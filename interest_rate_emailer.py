@@ -264,105 +264,115 @@ def format_email_body(results, previous_rates):
     return "\n".join(lines)
 
 
+FONT_STACK = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+
+
 def format_email_html(results, previous_rates):
-    """Card-style HTML version of the summary - same data as the plain-text
-    body, laid out as a table with change badges instead of fixed-width text.
+    """Email-client-safe HTML version of the summary. Gmail (and most other
+    webmail clients) strip <style> blocks and CSS classes, so every style
+    here is applied inline on the element itself, and layout uses nested
+    <table>s rather than divs/flexbox - the standard approach for HTML email.
     """
     esc = html.escape
     today = now_vn().strftime("%A, %B %d %Y - %H:%M")
 
+    def badge(text, bg, fg):
+        return (
+            f'<span style="display:inline-block;margin-top:6px;font-size:12px;'
+            f'color:{fg};background:{bg};padding:2px 9px;border-radius:999px;'
+            f'font-family:{FONT_STACK};">{text}</span>'
+        )
+
     rows_html = []
-    for name, _url in SOURCES:
+    for i, (name, _url) in enumerate(SOURCES):
         r = results.get(name, {})
+        border = "" if i == len(SOURCES) - 1 else "border-bottom:1px solid #f0f1f3;"
         if r.get("ok"):
-            rate_cell = f'<span class="rate">{esc(r["rate"])}</span>'
-            badge = ""
+            change_badge = ""
             prev = previous_rates.get(name) if previous_rates else None
             if prev and prev != r["rate"]:
-                badge = f'<div class="badge">changed &middot; was {esc(prev)}</div>'
-            as_of_cell = esc(r.get("as_of", ""))
+                change_badge = "<br>" + badge(f"changed &middot; was {esc(prev)}", "#fef3c7", "#92400e")
             row = f"""
             <tr>
-              <td class="bank">{esc(name)}</td>
-              <td class="rate-col">{rate_cell}{badge}</td>
-              <td class="asof">{as_of_cell}</td>
+              <td style="padding:14px 24px;{border}vertical-align:top;font-family:{FONT_STACK};
+                         font-size:14px;font-weight:600;color:#111827;width:40%;">{esc(name)}</td>
+              <td style="padding:14px 24px;{border}vertical-align:top;font-family:{FONT_STACK};
+                         font-size:14px;">
+                <span style="font-weight:700;color:#111827;">{esc(r['rate'])}</span>{change_badge}
+              </td>
+              <td style="padding:14px 24px;{border}vertical-align:top;font-family:{FONT_STACK};
+                         font-size:13px;color:#6b7280;text-align:right;white-space:nowrap;">{esc(r.get('as_of',''))}</td>
             </tr>"""
         else:
             err = esc(r.get("error", "unknown error"))
             row = f"""
-            <tr class="unavailable">
-              <td class="bank">{esc(name)}</td>
-              <td class="rate-col" colspan="2">
-                <span class="unavailable-label">Unavailable this run</span>
-                <div class="badge badge-error">{err}</div>
+            <tr>
+              <td style="padding:14px 24px;{border}vertical-align:top;font-family:{FONT_STACK};
+                         font-size:14px;font-weight:600;color:#9ca3af;width:40%;">{esc(name)}</td>
+              <td style="padding:14px 24px;{border}vertical-align:top;font-family:{FONT_STACK};" colspan="2">
+                <span style="font-size:13px;color:#9ca3af;font-style:italic;">Unavailable this run</span><br>
+                {badge(err, "#fee2e2", "#991b1b")}
               </td>
             </tr>"""
         rows_html.append(row)
 
-    sources_html = "".join(
-        f'<li><span class="source-name">{esc(name)}</span> '
-        f'<a href="{esc(url)}">{esc(url)}</a></li>'
+    sources_rows = "".join(
+        f'<tr><td style="padding:2px 0;font-size:12px;color:#374151;font-family:{FONT_STACK};'
+        f'white-space:nowrap;padding-right:12px;">{esc(name)}</td>'
+        f'<td style="padding:2px 0;font-size:12px;font-family:{FONT_STACK};">'
+        f'<a href="{esc(url)}" style="color:#2563eb;text-decoration:none;">{esc(url)}</a></td></tr>'
         for name, url in SOURCES
     )
 
     return f"""\
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-</head>
-<body style="margin:0;padding:0;background:#f4f5f7;">
-<style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }}
-  .wrap {{ max-width: 640px; margin: 0 auto; padding: 24px 16px; }}
-  .card {{ background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
-  .header {{ background: #1f2937; color: #ffffff; padding: 20px 24px; }}
-  .header h1 {{ margin: 0; font-size: 18px; font-weight: 600; }}
-  .header p {{ margin: 4px 0 0; font-size: 13px; color: #9ca3af; }}
-  table {{ width: 100%; border-collapse: collapse; }}
-  th {{ text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em;
-        color: #6b7280; padding: 14px 24px 8px; border-bottom: 1px solid #e5e7eb; }}
-  td {{ padding: 14px 24px; border-bottom: 1px solid #f0f1f3; vertical-align: top; }}
-  tr:last-child td {{ border-bottom: none; }}
-  .bank {{ font-size: 14px; font-weight: 600; color: #111827; width: 42%; }}
-  .rate-col {{ font-size: 14px; }}
-  .rate {{ font-weight: 700; color: #111827; font-variant-numeric: tabular-nums; }}
-  .asof {{ font-size: 13px; color: #6b7280; text-align: right; }}
-  .badge {{ display: inline-block; margin-top: 4px; font-size: 12px; color: #92400e;
-            background: #fef3c7; padding: 2px 8px; border-radius: 999px; }}
-  .badge-error {{ color: #991b1b; background: #fee2e2; }}
-  .unavailable .bank {{ color: #9ca3af; }}
-  .unavailable-label {{ font-size: 13px; color: #9ca3af; font-style: italic; }}
-  .footer {{ padding: 16px 24px 22px; }}
-  .footer h2 {{ font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em;
-                color: #6b7280; margin: 0 0 8px; }}
-  .footer ul {{ margin: 0; padding: 0; list-style: none; }}
-  .footer li {{ font-size: 12px; color: #6b7280; margin-bottom: 4px; }}
-  .footer .source-name {{ display: inline-block; min-width: 150px; color: #374151; }}
-  .footer a {{ color: #2563eb; text-decoration: none; }}
-</style>
-<div class="wrap">
-  <div class="card">
-    <div class="header">
-      <h1>Central Bank Interest Rates</h1>
-      <p>{esc(today)} (Vietnam time)</p>
-    </div>
-    <table>
-      <tr>
-        <th>Central bank</th>
-        <th>Rate</th>
-        <th style="text-align:right;">As of</th>
-      </tr>
-      {"".join(rows_html)}
-    </table>
-    <div class="footer">
-      <h2>Sources</h2>
-      <ul>{sources_html}</ul>
-    </div>
-  </div>
-</div>
-</body>
-</html>"""
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+       style="background:#f4f5f7;padding:24px 0;">
+  <tr>
+    <td align="center">
+      <table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0"
+             style="max-width:640px;width:100%;background:#ffffff;border-radius:12px;
+                    overflow:hidden;border:1px solid #e5e7eb;">
+        <tr>
+          <td style="background:#1f2937;padding:20px 24px;">
+            <div style="font-family:{FONT_STACK};font-size:18px;font-weight:700;color:#ffffff;">
+              Central Bank Interest Rates
+            </div>
+            <div style="font-family:{FONT_STACK};font-size:13px;color:#9ca3af;margin-top:4px;">
+              {esc(today)} (Vietnam time)
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td style="padding:14px 24px 8px;font-family:{FONT_STACK};font-size:12px;
+                           text-transform:uppercase;letter-spacing:0.04em;color:#6b7280;
+                           border-bottom:1px solid #e5e7eb;">Central bank</td>
+                <td style="padding:14px 24px 8px;font-family:{FONT_STACK};font-size:12px;
+                           text-transform:uppercase;letter-spacing:0.04em;color:#6b7280;
+                           border-bottom:1px solid #e5e7eb;">Rate</td>
+                <td style="padding:14px 24px 8px;font-family:{FONT_STACK};font-size:12px;
+                           text-transform:uppercase;letter-spacing:0.04em;color:#6b7280;
+                           border-bottom:1px solid #e5e7eb;text-align:right;">As of</td>
+              </tr>
+              {"".join(rows_html)}
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:16px 24px 22px;">
+            <div style="font-family:{FONT_STACK};font-size:12px;text-transform:uppercase;
+                        letter-spacing:0.04em;color:#6b7280;margin-bottom:8px;">Sources</div>
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+              {sources_rows}
+            </table>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>"""
 
 
 # --- Email ------------------------------------------------------------------
