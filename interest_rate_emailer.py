@@ -22,8 +22,8 @@ since none of the three publishes a clean English API - if a run reports
 fetch_* function below.
 
 Usage:
-  python interest_rate_emailer.py generate   # fetch rates, build email body -> email_body.txt
-  python interest_rate_emailer.py send       # send email_body.txt via SMTP
+  python interest_rate_emailer.py generate   # fetch rates, build email body -> email_body.txt / email_body.html
+  python interest_rate_emailer.py send       # send both bodies (plain text + styled HTML) via SMTP
 
 Required environment variables (set as GitHub Actions secrets, or export locally):
   GMAIL_ADDRESS          - sender gmail address
@@ -39,11 +39,13 @@ Optional environment variables:
 import os
 import sys
 import json
+import html
 import smtplib
 import traceback
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 import requests
 from bs4 import BeautifulSoup
@@ -70,6 +72,7 @@ SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 
 EMAIL_BODY_FILE = "email_body.txt"
+EMAIL_HTML_FILE = "email_body.html"
 STATE_FILE = "last_rates.json"
 
 # Sent with every scrape request. Several central bank sites block the bare
@@ -261,14 +264,120 @@ def format_email_body(results, previous_rates):
     return "\n".join(lines)
 
 
+def format_email_html(results, previous_rates):
+    """Card-style HTML version of the summary - same data as the plain-text
+    body, laid out as a table with change badges instead of fixed-width text.
+    """
+    esc = html.escape
+    today = now_vn().strftime("%A, %B %d %Y - %H:%M")
+
+    rows_html = []
+    for name, _url in SOURCES:
+        r = results.get(name, {})
+        if r.get("ok"):
+            rate_cell = f'<span class="rate">{esc(r["rate"])}</span>'
+            badge = ""
+            prev = previous_rates.get(name) if previous_rates else None
+            if prev and prev != r["rate"]:
+                badge = f'<div class="badge">changed &middot; was {esc(prev)}</div>'
+            as_of_cell = esc(r.get("as_of", ""))
+            row = f"""
+            <tr>
+              <td class="bank">{esc(name)}</td>
+              <td class="rate-col">{rate_cell}{badge}</td>
+              <td class="asof">{as_of_cell}</td>
+            </tr>"""
+        else:
+            err = esc(r.get("error", "unknown error"))
+            row = f"""
+            <tr class="unavailable">
+              <td class="bank">{esc(name)}</td>
+              <td class="rate-col" colspan="2">
+                <span class="unavailable-label">Unavailable this run</span>
+                <div class="badge badge-error">{err}</div>
+              </td>
+            </tr>"""
+        rows_html.append(row)
+
+    sources_html = "".join(
+        f'<li><span class="source-name">{esc(name)}</span> '
+        f'<a href="{esc(url)}">{esc(url)}</a></li>'
+        for name, url in SOURCES
+    )
+
+    return f"""\
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+</head>
+<body style="margin:0;padding:0;background:#f4f5f7;">
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }}
+  .wrap {{ max-width: 640px; margin: 0 auto; padding: 24px 16px; }}
+  .card {{ background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
+  .header {{ background: #1f2937; color: #ffffff; padding: 20px 24px; }}
+  .header h1 {{ margin: 0; font-size: 18px; font-weight: 600; }}
+  .header p {{ margin: 4px 0 0; font-size: 13px; color: #9ca3af; }}
+  table {{ width: 100%; border-collapse: collapse; }}
+  th {{ text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em;
+        color: #6b7280; padding: 14px 24px 8px; border-bottom: 1px solid #e5e7eb; }}
+  td {{ padding: 14px 24px; border-bottom: 1px solid #f0f1f3; vertical-align: top; }}
+  tr:last-child td {{ border-bottom: none; }}
+  .bank {{ font-size: 14px; font-weight: 600; color: #111827; width: 42%; }}
+  .rate-col {{ font-size: 14px; }}
+  .rate {{ font-weight: 700; color: #111827; font-variant-numeric: tabular-nums; }}
+  .asof {{ font-size: 13px; color: #6b7280; text-align: right; }}
+  .badge {{ display: inline-block; margin-top: 4px; font-size: 12px; color: #92400e;
+            background: #fef3c7; padding: 2px 8px; border-radius: 999px; }}
+  .badge-error {{ color: #991b1b; background: #fee2e2; }}
+  .unavailable .bank {{ color: #9ca3af; }}
+  .unavailable-label {{ font-size: 13px; color: #9ca3af; font-style: italic; }}
+  .footer {{ padding: 16px 24px 22px; }}
+  .footer h2 {{ font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em;
+                color: #6b7280; margin: 0 0 8px; }}
+  .footer ul {{ margin: 0; padding: 0; list-style: none; }}
+  .footer li {{ font-size: 12px; color: #6b7280; margin-bottom: 4px; }}
+  .footer .source-name {{ display: inline-block; min-width: 150px; color: #374151; }}
+  .footer a {{ color: #2563eb; text-decoration: none; }}
+</style>
+<div class="wrap">
+  <div class="card">
+    <div class="header">
+      <h1>Central Bank Interest Rates</h1>
+      <p>{esc(today)} (Vietnam time)</p>
+    </div>
+    <table>
+      <tr>
+        <th>Central bank</th>
+        <th>Rate</th>
+        <th style="text-align:right;">As of</th>
+      </tr>
+      {"".join(rows_html)}
+    </table>
+    <div class="footer">
+      <h2>Sources</h2>
+      <ul>{sources_html}</ul>
+    </div>
+  </div>
+</div>
+</body>
+</html>"""
+
+
 # --- Email ------------------------------------------------------------------
 
 
-def send_email(body):
-    msg = MIMEText(body)
+def send_email(text_body, html_body):
+    msg = MIMEMultipart("alternative")
     msg["Subject"] = f"Interest Rate Summary - {now_vn().strftime('%Y-%m-%d %H:%M')}"
     msg["From"] = GMAIL_ADDRESS
     msg["To"] = INTEREST_RATE_RECIPIENT
+    # Attach plain text first, HTML second - email clients render the last
+    # part that they support, so HTML wins in modern clients while plain
+    # text still works as a fallback everywhere else.
+    msg.attach(MIMEText(text_body, "plain"))
+    msg.attach(MIMEText(html_body, "html"))
 
     with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
         server.starttls()
@@ -286,26 +395,33 @@ def cmd_generate():
     if SEND_ONLY_ON_CHANGE and not has_changed(results, previous_rates):
         print("No rate changes since last run, skipping email.")
         open(EMAIL_BODY_FILE, "w").close()
+        open(EMAIL_HTML_FILE, "w").close()
         save_rates(results)
         return
 
-    body = format_email_body(results, previous_rates)
-    with open(EMAIL_BODY_FILE, "w") as f:
-        f.write(body)
+    text_body = format_email_body(results, previous_rates)
+    html_body = format_email_html(results, previous_rates)
 
-    print(body)
+    with open(EMAIL_BODY_FILE, "w") as f:
+        f.write(text_body)
+    with open(EMAIL_HTML_FILE, "w") as f:
+        f.write(html_body)
+
+    print(text_body)
     save_rates(results)
 
 
 def cmd_send():
-    if not os.path.exists(EMAIL_BODY_FILE):
+    if not (os.path.exists(EMAIL_BODY_FILE) and os.path.exists(EMAIL_HTML_FILE)):
         print("No email body found, run 'generate' first.")
         return
 
     with open(EMAIL_BODY_FILE) as f:
-        body = f.read()
+        text_body = f.read()
+    with open(EMAIL_HTML_FILE) as f:
+        html_body = f.read()
 
-    if not body.strip():
+    if not text_body.strip():
         print("Email body empty, nothing to send.")
         return
 
@@ -313,7 +429,7 @@ def cmd_send():
         print("GMAIL_ADDRESS / GMAIL_APP_PASSWORD / INTEREST_RATE_RECIPIENT not set, skipping send.")
         return
 
-    send_email(body)
+    send_email(text_body, html_body)
     print("Email sent.")
 
 
