@@ -87,7 +87,7 @@ SOURCES = [
     ("European Central Bank", "https://data.ecb.europa.eu/data/datasets/FM"),
     ("Bank of England", "https://www.bankofengland.co.uk/monetary-policy/the-interest-rate-bank-rate"),
     ("Bank of Japan", "https://www.boj.or.jp/en/mopo/mpmdeci/state_all/index.htm"),
-    ("People's Bank of China", "http://www.pbc.gov.cn/en/3688006/3688372/index.html"),
+    ("People's Bank of China", "http://www.pbc.gov.cn/english/130721/index.html"),
     ("State Bank of Vietnam", "https://www.sbv.gov.vn/webcenter/portal/en/home/rm/ir"),
 ]
 
@@ -117,7 +117,11 @@ def fetch_ecb_rate():
     resp = requests.get(url, headers={**HEADERS, "Accept": "application/json"}, timeout=15)
     resp.raise_for_status()
     data = resp.json()
-    series = data["dataSets"][0]["series"]["0:0:0:0:0:0"]["observations"]
+    all_series = data["dataSets"][0]["series"]
+    # Don't assume the series key - ECB sometimes returns a different
+    # dimension combination than "0:0:0:0:0:0" depending on what's live.
+    series_key = next(iter(all_series))
+    series = all_series[series_key]["observations"]
     latest_key = sorted(series.keys(), key=int)[-1]
     value = series[latest_key][0]
     date = data["structure"]["dimensions"]["observation"][0]["values"][int(latest_key)]["id"]
@@ -153,7 +157,7 @@ def fetch_boj_rate():
 
 def fetch_pboc_rate():
     """PBOC Loan Prime Rate - best-effort scrape of the latest release headline."""
-    url = "http://www.pbc.gov.cn/en/3688006/3688372/index.html"
+    url = "http://www.pbc.gov.cn/english/130721/index.html"
     resp = requests.get(url, headers=HEADERS, timeout=15)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -190,8 +194,15 @@ FETCHERS = [
 def load_previous_rates():
     if not os.path.exists(STATE_FILE):
         return None
-    with open(STATE_FILE) as f:
-        return json.load(f)
+    try:
+        with open(STATE_FILE) as f:
+            content = f.read().strip()
+        if not content:
+            return None
+        return json.loads(content)
+    except json.JSONDecodeError:
+        print(f"{STATE_FILE} exists but isn't valid JSON, treating as no previous state.")
+        return None
 
 
 def save_rates(results):
