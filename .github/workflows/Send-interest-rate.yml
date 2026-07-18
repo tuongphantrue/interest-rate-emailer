@@ -2,7 +2,6 @@ name: Send Interest Rate Summary
 
 on:
   schedule:
-    # 8am Vietnam time (UTC+7) = 1am UTC. Cron is always UTC.
     - cron: "*/30 * * * *"
   workflow_dispatch: {}
 
@@ -28,7 +27,7 @@ jobs:
         continue-on-error: true
         run: |
           git fetch origin interest-rate-state:interest-rate-state 2>/dev/null || true
-          git show interest-rate-state:last_rates.json > last_rates.json 2>/dev/null || true
+          git show interest-rate-state:last_rates.json > last_rates.json.tmp 2>/dev/null && mv last_rates.json.tmp last_rates.json || rm -f last_rates.json.tmp
 
       - name: Generate email
         env:
