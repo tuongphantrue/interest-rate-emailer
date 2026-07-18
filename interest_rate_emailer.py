@@ -37,6 +37,7 @@ Optional environment variables:
 """
 
 import os
+import re
 import sys
 import json
 import html
@@ -94,6 +95,58 @@ SOURCES = [
     ("State Bank of Vietnam", "https://www.sbv.gov.vn/webcenter/portal/en/home/rm/ir"),
 ]
 
+# --- Scrape helpers (BOJ/PBOC/SBV don't publish clean APIs) -----------------
+
+NAV_JUNK = {
+    "skip to main content", "skip to content", "home", "back", "top",
+    "next", "previous", "menu", "search", "close", "sign in", "login",
+    "english", "vietnamese", "japanese", "chinese",
+}
+
+
+def fix_encoding(resp):
+    """requests defaults to ISO-8859-1 when a server doesn't send a charset
+    header, which mangles UTF-8 pages into mojibake. Re-detect if needed.
+    """
+    if not resp.encoding or resp.encoding.lower() == "iso-8859-1":
+        resp.encoding = resp.apparent_encoding
+    return resp
+
+
+def strip_chrome(soup):
+    """Remove nav/header/footer/script chrome so we don't accidentally pick
+    up a "Skip to main content" link or a breadcrumb trail as the content.
+    """
+    for tag in soup.find_all(["nav", "header", "footer", "script", "style", "noscript"]):
+        tag.decompose()
+    for tag in soup.find_all(attrs={"class": re.compile(r"nav|menu|header|footer|breadcrumb|skip", re.I)}):
+        tag.decompose()
+    for tag in soup.find_all(attrs={"id": re.compile(r"nav|menu|header|footer|breadcrumb|skip", re.I)}):
+        tag.decompose()
+    return soup
+
+
+def find_rate_snippet(soup):
+    """Looks for a short snippet of real text containing a percent figure
+    (e.g. "...LPR was kept at 3.0%...") after stripping page chrome. Falls
+    back to the first substantial, non-nav link text if no percent figure
+    is found on the page at all.
+    """
+    strip_chrome(soup)
+    text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
+    # Split into sentences rather than using a "stop at the next period"
+    # character class, which would cut off decimals like "3.5%" mid-number.
+    sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z(])", text)
+    for sentence in sentences:
+        if re.search(r"\d{1,2}(?:\.\d{1,2})?\s?%", sentence):
+            return sentence.strip()[:220]
+    for a in soup.find_all("a"):
+        t = a.get_text(strip=True)
+        if t and len(t) >= 15 and t.lower() not in NAV_JUNK:
+            return t
+    return None
+
+
 # --- Fetch --------------------------------------------------------------------
 
 
@@ -147,39 +200,65 @@ def fetch_boe_rate():
 
 
 def fetch_boj_rate():
-    """Bank of Japan policy rate - best-effort scrape of the latest decision headline."""
-    url = "https://www.boj.or.jp/en/mopo/mpmdeci/state_all/index.htm"
-    resp = requests.get(url, headers=HEADERS, timeout=15)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-    latest = soup.find("a")
-    if not latest:
-        raise RuntimeError("No decision entries found - page markup may have changed")
-    return {"rate": latest.get_text(strip=True), "as_of": now_vn().strftime("%Y-%m-%d")}
+    """Bank of Japan policy rate - reads the official statements table for
+    the current year (falling back to last year in January) and returns the
+    latest statement's title + date. BOJ's statements are PDFs without a
+    numeric rate in the page text itself, so this reports the release
+    rather than a parsed percentage - see the README for why.
+    """
+    for year in (now_vn().year, now_vn().year - 1):
+        url = f"https://www.boj.or.jp/en/mopo/mpmdeci/state_{year}/index.htm"
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+        except requests.exceptions.HTTPError:
+            continue
+        fix_encoding(resp)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        strip_chrome(soup)
+        table = soup.find("table")
+        if not table:
+            continue
+        rows = [r for r in table.find_all("tr") if r.find_all("td")]
+        if not rows:
+            continue
+        cells = rows[0].find_all("td")
+        date_text = cells[0].get_text(strip=True)
+        title_text = cells[1].get_text(" ", strip=True)
+        return {"rate": title_text, "as_of": date_text}
+    raise RuntimeError("No statements table found for current or previous year")
 
 
 def fetch_pboc_rate():
-    """PBOC Loan Prime Rate - best-effort scrape of the latest release headline."""
+    """PBOC Loan Prime Rate - best-effort scrape of the English news index.
+    Fixes response encoding (the page was rendering as mojibake without
+    this) and strips nav chrome before looking for a percent figure.
+    """
     url = "http://www.pbc.gov.cn/english/130721/index.html"
     resp = requests.get(url, headers=HEADERS, timeout=15)
     resp.raise_for_status()
+    fix_encoding(resp)
     soup = BeautifulSoup(resp.text, "html.parser")
-    latest = soup.find("a")
-    if not latest:
-        raise RuntimeError("No release entries found - page markup may have changed")
-    return {"rate": latest.get_text(strip=True), "as_of": now_vn().strftime("%Y-%m-%d")}
+    snippet = find_rate_snippet(soup)
+    if not snippet:
+        raise RuntimeError("No rate figure or headline found - page markup may have changed")
+    return {"rate": snippet, "as_of": now_vn().strftime("%Y-%m-%d")}
 
 
 def fetch_sbv_rate():
-    """State Bank of Vietnam refinancing rate - best-effort scrape of the rates page."""
+    """State Bank of Vietnam refinancing rate - best-effort scrape of the
+    rates page. Strips nav/breadcrumb chrome and looks for a percent figure
+    instead of dumping the raw page text.
+    """
     url = "https://www.sbv.gov.vn/webcenter/portal/en/home/rm/ir"
     resp = requests.get(url, headers=HEADERS, timeout=15)
     resp.raise_for_status()
+    fix_encoding(resp)
     soup = BeautifulSoup(resp.text, "html.parser")
-    text = soup.get_text(" ", strip=True)[:200]
-    if not text:
-        raise RuntimeError("Page returned no readable text - markup may have changed")
-    return {"rate": text, "as_of": now_vn().strftime("%Y-%m-%d")}
+    snippet = find_rate_snippet(soup)
+    if not snippet:
+        raise RuntimeError("No rate figure or headline found - page markup may have changed")
+    return {"rate": snippet, "as_of": now_vn().strftime("%Y-%m-%d")}
 
 
 FETCHERS = [
