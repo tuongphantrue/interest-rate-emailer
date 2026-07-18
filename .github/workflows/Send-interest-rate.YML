@@ -1,0 +1,56 @@
+name: Send Interest Rate Summary
+
+on:
+  schedule:
+    # 8am Vietnam time (UTC+7) = 1am UTC. Cron is always UTC.
+    - cron: "0 1 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  send-interest-rate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore previous state
+        continue-on-error: true
+        run: |
+          git fetch origin interest-rate-state:interest-rate-state 2>/dev/null || true
+          git show interest-rate-state:last_rates.json > last_rates.json 2>/dev/null || true
+
+      - name: Generate email
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          SEND_ONLY_ON_CHANGE: "false"
+        run: python interest_rate_emailer.py generate
+
+      - name: Send email
+        env:
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          INTEREST_RATE_RECIPIENT: ${{ secrets.INTEREST_RATE_RECIPIENT }}
+        run: python interest_rate_emailer.py send
+
+      - name: Save state
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan interest-rate-state-new
+          git reset
+          git add last_rates.json 2>/dev/null || true
+          git commit -m "Update rate state" --allow-empty
+          git branch -f interest-rate-state interest-rate-state-new
+          git push origin interest-rate-state -f
