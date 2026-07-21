@@ -1,25 +1,32 @@
 """
 interest_rate_emailer.py
 
-Fetches current policy interest rates from six major central banks and
-emails a summary. Designed to run on GitHub Actions (see
-.github/workflows/send-interest-rate.yml) or locally via cron. No local
-computer needs to stay on.
+Fetches both the policy rate and the average commercial bank deposit rate
+for six major economies and emails a summary. Designed to run on GitHub
+Actions (see .github/workflows/send-interest-rate.yml) or locally via
+cron. No local computer needs to stay on.
 
-Central banks covered (each rendered as its own line, each degrades
-gracefully if it fails on a given run):
+Why two rates per bank: a central bank's policy rate (e.g. SBV's 4.5%
+refinancing rate) is what it charges commercial banks - it is NOT what
+those banks pay savers or charge borrowers. Commercial deposit/lending
+rates are set by each bank individually and are usually higher. Showing
+both side by side avoids the "why does my bank offer 7-8% when the central
+bank rate is 4.5%?" confusion.
 
-1. US Federal Reserve - Fed Funds target rate, via FRED API (free, needs a key)
-2. European Central Bank - main refinancing rate, via ECB Statistical Data Warehouse API (no key)
-3. Bank of England - Bank Rate, via BOE's public statistics page (no key)
-4. Bank of Japan - policy rate, scraped from boj.or.jp (no clean API published)
-5. People's Bank of China - Loan Prime Rate, scraped from pbc.gov.cn (no clean API published)
-6. State Bank of Vietnam - refinancing rate, scraped from sbv.gov.vn (no clean API published)
+Economies covered (each rendered as its own row, each rate degrades
+independently if it fails to fetch on a given run):
 
-The three scraped sources (BOJ, PBOC, SBV) grab a best-effort headline/link
-since none of the three publishes a clean English API - if a run reports
-"unavailable", the site's markup probably changed; check the corresponding
-fetch_* function below.
+1. United States - Fed Funds target rate via FRED API (free, needs a key); deposit rate via TradingEconomics
+2. Euro Area - ECB main refinancing rate via ECB Statistical Data Warehouse API (no key); deposit rate via TradingEconomics
+3. United Kingdom - BOE Bank Rate via BOE's public statistics page (no key); deposit rate via TradingEconomics
+4. Japan - BOJ policy rate via TradingEconomics (BOJ's own site publishes decisions as PDFs with no parsable number)
+5. China - PBOC Loan Prime Rate via TradingEconomics (PBOC's own English news index mixes unrelated headlines)
+6. Vietnam - SBV refinancing rate via TradingEconomics (SBV's own portal is a noisy multi-widget page)
+
+Both the policy rate and the deposit rate for Japan/China/Vietnam are read
+from TradingEconomics, since it reports every country in the same
+consistent plain-English sentence format - far more reliable than each
+central bank's own differently-structured site.
 
 Usage:
   python interest_rate_emailer.py generate   # fetch rates, build email body -> email_body.txt / email_body.html
@@ -93,6 +100,24 @@ SOURCES = [
     ("Bank of Japan", "https://tradingeconomics.com/japan/interest-rate"),
     ("People's Bank of China", "https://tradingeconomics.com/china/interest-rate"),
     ("State Bank of Vietnam", "https://tradingeconomics.com/vietnam/interest-rate"),
+]
+
+# Deposit rate = what commercial banks actually pay savers, as opposed to
+# the policy rate above (what the central bank charges commercial banks).
+# All six are read from TradingEconomics for the same consistent-format
+# reason the Japan/China/Vietnam policy rates are.
+DEPOSIT_SLUGS = {
+    "US Federal Reserve": "united-states",
+    "European Central Bank": "euro-area",
+    "Bank of England": "united-kingdom",
+    "Bank of Japan": "japan",
+    "People's Bank of China": "china",
+    "State Bank of Vietnam": "vietnam",
+}
+
+DEPOSIT_SOURCES = [
+    (name, f"https://tradingeconomics.com/{slug}/deposit-interest-rate")
+    for name, slug in DEPOSIT_SLUGS.items()
 ]
 
 # --- Scrape helpers ----------------------------------------------------------
@@ -187,6 +212,47 @@ def fetch_te_rate(country_slug):
     return {"rate": f"{rate_match.group(1)}%", "as_of": as_of}
 
 
+def fetch_te_deposit_rate(country_slug):
+    """Fetches a country's average commercial bank deposit rate from
+    TradingEconomics - a different figure from the central bank's own
+    policy rate above. This is what commercial banks actually pay savers,
+    which is why it's often higher than the policy rate (e.g. Vietnam's
+    SBV refinancing rate sits at 4.5% while banks advertise 6-8% deposit
+    rates - the policy rate isn't what banks pay you).
+
+    TradingEconomics phrases this a few different ways depending on the
+    country ("increased to X percent in <month/year>", "remained unchanged
+    at X percent in <year>", etc) so the regex matches any of them, then
+    falls back to the indicators table row for the date if the headline
+    sentence didn't include one.
+    """
+    url = f"https://tradingeconomics.com/{country_slug}/deposit-interest-rate"
+    resp = requests.get(url, headers=HEADERS, timeout=15)
+    resp.raise_for_status()
+    fix_encoding(resp)
+    soup = BeautifulSoup(resp.text, "html.parser")
+    text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
+
+    rate_match = re.search(
+        r"Deposit (?:Interest Rate|Facility Rate).{0,40}?"
+        r"(?:remained unchanged at|increased to|decreased to|rose to|fell to|stood at|was)\s+"
+        r"([\d.]+)\s*percent(?:\s+in\s+([A-Za-z]+\.?\s*\d{4}|\d{4}))?",
+        text, re.I,
+    )
+    if not rate_match:
+        raise RuntimeError("Rate sentence not found - page markup may have changed")
+
+    as_of = rate_match.group(2)
+    if not as_of:
+        table_match = re.search(
+            r"Deposit (?:Interest Rate|Facility Rate)\s+[\d.]+\s+[\d.]+\s+percent\s+([A-Za-z]{3,9}\.?\s+\d{4})",
+            text,
+        )
+        as_of = table_match.group(1) if table_match else now_vn().strftime("%Y-%m-%d")
+
+    return {"rate": f"{rate_match.group(1)}%", "as_of": as_of}
+
+
 def fetch_boj_rate():
     """Bank of Japan policy rate, via TradingEconomics (BOJ's own decisions
     are published as PDFs with no numeric rate in the surrounding page text,
@@ -235,7 +301,15 @@ def load_previous_rates():
 
 
 def save_rates(results):
-    snapshot = {name: r["rate"] for name, r in results.items() if r.get("ok")}
+    snapshot = {}
+    for name, r in results.items():
+        entry = {}
+        if r["policy"].get("ok"):
+            entry["policy"] = r["policy"]["rate"]
+        if r["deposit"].get("ok"):
+            entry["deposit"] = r["deposit"]["rate"]
+        if entry:
+            snapshot[name] = entry
     with open(STATE_FILE, "w") as f:
         json.dump(snapshot, f)
 
@@ -244,9 +318,10 @@ def has_changed(results, previous_rates):
     if previous_rates is None:
         return True
     for name, r in results.items():
-        if not r.get("ok"):
-            continue
-        if previous_rates.get(name) != r["rate"]:
+        prev = previous_rates.get(name, {})
+        if r["policy"].get("ok") and prev.get("policy") != r["policy"]["rate"]:
+            return True
+        if r["deposit"].get("ok") and prev.get("deposit") != r["deposit"]["rate"]:
             return True
     return False
 
@@ -254,37 +329,59 @@ def has_changed(results, previous_rates):
 # --- Formatting ----------------------------------------------------------------
 
 
+def _try_fetch(fetcher, name, label):
+    try:
+        data = fetcher()
+        return {"ok": True, "rate": data["rate"], "as_of": data["as_of"]}
+    except Exception as e:
+        print(f"{name} {label} source failed ({e}), continuing without it.")
+        traceback.print_exc()
+        return {"ok": False, "error": str(e)}
+
+
 def collect_rates():
     results = {}
     for name, fetcher in FETCHERS:
-        try:
-            data = fetcher()
-            results[name] = {"ok": True, "rate": data["rate"], "as_of": data["as_of"]}
-        except Exception as e:
-            print(f"{name} source failed ({e}), continuing without it.")
-            traceback.print_exc()
-            results[name] = {"ok": False, "error": str(e)}
+        policy = _try_fetch(fetcher, name, "policy rate")
+        slug = DEPOSIT_SLUGS.get(name)
+        if slug:
+            deposit = _try_fetch(lambda slug=slug: fetch_te_deposit_rate(slug), name, "deposit rate")
+        else:
+            deposit = {"ok": False, "error": "no deposit source configured"}
+        results[name] = {"policy": policy, "deposit": deposit}
     return results
 
 
 def format_email_body(results, previous_rates):
     lines = [f"Central bank interest rates - {now_vn().strftime('%Y-%m-%d %H:%M')}\n"]
-    lines.append(f"{'Central bank':<26}{'Rate':<28}{'As of'}")
-    lines.append("-" * 70)
+    lines.append(f"{'Central bank':<24} | {'Policy rate':<28} | {'Deposit rate'}")
+    lines.append("-" * 95)
+
+    def cell(d, prev_val):
+        if d.get("ok"):
+            s = f"{d['rate']} ({d['as_of']})"
+            if prev_val and prev_val != d["rate"]:
+                s += f" [was {prev_val}]"
+            return s
+        return f"unavailable ({d.get('error', 'unknown error')})"
 
     for name, _url in SOURCES:
-        r = results.get(name, {})
-        if r.get("ok"):
-            changed = ""
-            if previous_rates and previous_rates.get(name) not in (None, r["rate"]):
-                changed = f"  (was {previous_rates[name]})"
-            lines.append(f"{name:<26}{r['rate']:<28}{r['as_of']}{changed}")
-        else:
-            lines.append(f"{name:<26}unavailable this run ({r.get('error', 'unknown error')})")
+        r = results.get(name, {"policy": {}, "deposit": {}})
+        prev = (previous_rates or {}).get(name, {})
+        policy_cell = cell(r.get("policy", {}), prev.get("policy"))
+        deposit_cell = cell(r.get("deposit", {}), prev.get("deposit"))
+        lines.append(f"{name:<24} | {policy_cell:<28} | {deposit_cell}")
 
     lines.append("")
-    lines.append("Sources:")
+    lines.append("Note: policy rate = what the central bank charges commercial banks.")
+    lines.append("Deposit rate = average rate commercial banks pay savers - usually higher.")
+    lines.append("")
+    lines.append("Policy rate sources:")
     for name, url in SOURCES:
+        lines.append(f"  {name}: {url}")
+    lines.append("")
+    lines.append("Deposit rate sources:")
+    for name, url in DEPOSIT_SOURCES:
         lines.append(f"  {name}: {url}")
 
     return "\n".join(lines)
@@ -309,46 +406,52 @@ def format_email_html(results, previous_rates):
             f'font-family:{FONT_STACK};">{text}</span>'
         )
 
+    def rate_cell(d, prev_val, border):
+        if d.get("ok"):
+            change_badge = ""
+            if prev_val and prev_val != d["rate"]:
+                change_badge = "<br>" + badge(f"changed &middot; was {esc(prev_val)}", "#fef3c7", "#92400e")
+            return f"""
+              <td style="padding:14px 20px;{border}vertical-align:top;font-family:{FONT_STACK};font-size:14px;">
+                <span style="font-weight:700;color:#111827;">{esc(d['rate'])}</span>
+                <div style="font-size:12px;color:#6b7280;margin-top:2px;">{esc(d.get('as_of',''))}</div>
+                {change_badge}
+              </td>"""
+        err = esc(d.get("error", "unknown error"))
+        return f"""
+              <td style="padding:14px 20px;{border}vertical-align:top;font-family:{FONT_STACK};">
+                <span style="font-size:13px;color:#9ca3af;font-style:italic;">Unavailable</span><br>
+                {badge(err, "#fee2e2", "#991b1b")}
+              </td>"""
+
     rows_html = []
     for i, (name, _url) in enumerate(SOURCES):
-        r = results.get(name, {})
+        r = results.get(name, {"policy": {}, "deposit": {}})
+        prev = (previous_rates or {}).get(name, {})
         border = "" if i == len(SOURCES) - 1 else "border-bottom:1px solid #f0f1f3;"
-        if r.get("ok"):
-            change_badge = ""
-            prev = previous_rates.get(name) if previous_rates else None
-            if prev and prev != r["rate"]:
-                change_badge = "<br>" + badge(f"changed &middot; was {esc(prev)}", "#fef3c7", "#92400e")
-            row = f"""
+        row = f"""
             <tr>
-              <td style="padding:14px 24px;{border}vertical-align:top;font-family:{FONT_STACK};
-                         font-size:14px;font-weight:600;color:#111827;width:40%;">{esc(name)}</td>
-              <td style="padding:14px 24px;{border}vertical-align:top;font-family:{FONT_STACK};
-                         font-size:14px;">
-                <span style="font-weight:700;color:#111827;">{esc(r['rate'])}</span>{change_badge}
-              </td>
-              <td style="padding:14px 24px;{border}vertical-align:top;font-family:{FONT_STACK};
-                         font-size:13px;color:#6b7280;text-align:right;white-space:nowrap;">{esc(r.get('as_of',''))}</td>
-            </tr>"""
-        else:
-            err = esc(r.get("error", "unknown error"))
-            row = f"""
-            <tr>
-              <td style="padding:14px 24px;{border}vertical-align:top;font-family:{FONT_STACK};
-                         font-size:14px;font-weight:600;color:#9ca3af;width:40%;">{esc(name)}</td>
-              <td style="padding:14px 24px;{border}vertical-align:top;font-family:{FONT_STACK};" colspan="2">
-                <span style="font-size:13px;color:#9ca3af;font-style:italic;">Unavailable this run</span><br>
-                {badge(err, "#fee2e2", "#991b1b")}
-              </td>
+              <td style="padding:14px 20px;{border}vertical-align:top;font-family:{FONT_STACK};
+                         font-size:14px;font-weight:600;color:#111827;width:30%;">{esc(name)}</td>
+              {rate_cell(r.get('policy', {}), prev.get('policy'), border)}
+              {rate_cell(r.get('deposit', {}), prev.get('deposit'), border)}
             </tr>"""
         rows_html.append(row)
 
-    sources_rows = "".join(
-        f'<tr><td style="padding:2px 0;font-size:12px;color:#374151;font-family:{FONT_STACK};'
-        f'white-space:nowrap;padding-right:12px;">{esc(name)}</td>'
-        f'<td style="padding:2px 0;font-size:12px;font-family:{FONT_STACK};">'
-        f'<a href="{esc(url)}" style="color:#2563eb;text-decoration:none;">{esc(url)}</a></td></tr>'
-        for name, url in SOURCES
-    )
+    def sources_block(title, source_list):
+        rows = "".join(
+            f'<tr><td style="padding:2px 0;font-size:12px;color:#374151;font-family:{FONT_STACK};'
+            f'white-space:nowrap;padding-right:12px;">{esc(name)}</td>'
+            f'<td style="padding:2px 0;font-size:12px;font-family:{FONT_STACK};">'
+            f'<a href="{esc(url)}" style="color:#2563eb;text-decoration:none;">{esc(url)}</a></td></tr>'
+            for name, url in source_list
+        )
+        return f"""
+            <div style="font-family:{FONT_STACK};font-size:12px;text-transform:uppercase;
+                        letter-spacing:0.04em;color:#6b7280;margin-bottom:8px;">{title}</div>
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:16px;">
+              {rows}
+            </table>"""
 
     return f"""\
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
@@ -372,27 +475,34 @@ def format_email_html(results, previous_rates):
           <td>
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
               <tr>
-                <td style="padding:14px 24px 8px;font-family:{FONT_STACK};font-size:12px;
+                <td style="padding:14px 20px 8px;font-family:{FONT_STACK};font-size:12px;
                            text-transform:uppercase;letter-spacing:0.04em;color:#6b7280;
                            border-bottom:1px solid #e5e7eb;">Central bank</td>
-                <td style="padding:14px 24px 8px;font-family:{FONT_STACK};font-size:12px;
+                <td style="padding:14px 20px 8px;font-family:{FONT_STACK};font-size:12px;
                            text-transform:uppercase;letter-spacing:0.04em;color:#6b7280;
-                           border-bottom:1px solid #e5e7eb;">Rate</td>
-                <td style="padding:14px 24px 8px;font-family:{FONT_STACK};font-size:12px;
+                           border-bottom:1px solid #e5e7eb;">Policy rate</td>
+                <td style="padding:14px 20px 8px;font-family:{FONT_STACK};font-size:12px;
                            text-transform:uppercase;letter-spacing:0.04em;color:#6b7280;
-                           border-bottom:1px solid #e5e7eb;text-align:right;">As of</td>
+                           border-bottom:1px solid #e5e7eb;">Deposit rate</td>
               </tr>
               {"".join(rows_html)}
             </table>
           </td>
         </tr>
         <tr>
+          <td style="padding:4px 24px 0;">
+            <div style="font-family:{FONT_STACK};font-size:12px;color:#6b7280;
+                        background:#f9fafb;border-radius:8px;padding:10px 14px;margin-top:16px;">
+              <strong style="color:#374151;">Policy rate</strong> = what the central bank charges
+              commercial banks. <strong style="color:#374151;">Deposit rate</strong> = the average
+              rate commercial banks pay savers - usually higher, and set independently by each bank.
+            </div>
+          </td>
+        </tr>
+        <tr>
           <td style="padding:16px 24px 22px;">
-            <div style="font-family:{FONT_STACK};font-size:12px;text-transform:uppercase;
-                        letter-spacing:0.04em;color:#6b7280;margin-bottom:8px;">Sources</div>
-            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
-              {sources_rows}
-            </table>
+            {sources_block("Policy rate sources", SOURCES)}
+            {sources_block("Deposit rate sources", DEPOSIT_SOURCES)}
           </td>
         </tr>
       </table>
