@@ -58,6 +58,44 @@ bare annual figure more than a year old with an "annual figure, may be
 outdated" badge, specifically so this one doesn't get mistaken for a
 current number.
 
+## Vietnam commercial banks (Vietcombank, Techcombank)
+
+Because the national-average deposit rate above isn't the number most
+people actually want, the email also has a second section with each
+bank's own advertised **12-month VND savings rate** (the tenor Vietnamese
+financial press typically uses when comparing banks).
+
+This is a meaningfully heavier feature than everything else in this repo:
+
+- **A headless browser is required.** Both banks' rate pages return
+  genuinely empty table cells in their raw HTML — the actual numbers are
+  populated by client-side JavaScript after the page loads. This was
+  confirmed by fetching both pages directly: the raw HTML literally has no
+  digits in it. Every other fetcher in this file uses a plain
+  `requests.get()`; these two use [Playwright](https://playwright.dev) to
+  render the page in a real headless Chromium instance first.
+- **This adds real cost and time.** Every run now installs Playwright's
+  Chromium binary (cached between runs via `actions/cache` so it doesn't
+  re-download every time, but the browser itself still needs to launch,
+  load two pages, and wait for their JS to settle) and takes noticeably
+  longer than the rest of the script combined. Since the schedule runs
+  every 30 minutes, this is worth being aware of against GitHub Actions'
+  free-tier minutes.
+- **Techcombank's fetcher is more likely to need a tweak.** Vietcombank's
+  page is a straightforward rendered table (read the row labeled "12"),
+  which is fairly stable. Techcombank's page renders as a set of product
+  cards (Phat Loc Savings, Flexible Savings, etc.) rather than one simple
+  table, so its fetcher does a best-effort text search for a 12-month
+  figure instead of a fixed table position — more likely to break if
+  Techcombank redesigns that page. If it starts reporting "unavailable",
+  check `fetch_techcombank_rate()` in `interest_rate_emailer.py` against
+  the site's current layout.
+- **Both banks offer other terms, online-only rates, and promotions** not
+  captured here (e.g. Vietcombank's site itself notes rates can run
+  higher for online deposits or short-term promotions). The 12-month
+  counter rate is a reasonable single number for comparison, not
+  necessarily the *best* rate either bank currently offers.
+
 If any single source fails to fetch, only that line notes the failure —
 the rest of the email still generates and sends normally.
 
@@ -145,6 +183,7 @@ If you'd rather run this on your own machine instead of GitHub Actions:
 
 ```
 pip install -r requirements.txt
+playwright install --with-deps chromium
 export FRED_API_KEY="your_fred_key"
 export GMAIL_ADDRESS="you@gmail.com"
 export GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"
