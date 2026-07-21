@@ -11,16 +11,25 @@ runners. Nothing needs to run on your own machine.
 | US Federal Reserve | Fed Funds target rate | FRED API (needs a free key) |
 | European Central Bank | Main refinancing rate | ECB Statistical Data Warehouse API |
 | Bank of England | Bank Rate | BOE public statistics page |
-| Bank of Japan | Policy rate | boj.or.jp (scraped, best-effort) |
-| People's Bank of China | Loan Prime Rate | pbc.gov.cn (scraped, best-effort) |
-| State Bank of Vietnam | Refinancing rate | sbv.gov.vn (scraped, best-effort) |
+| Bank of Japan | Policy rate | TradingEconomics (scraped) |
+| People's Bank of China | Loan Prime Rate | TradingEconomics (scraped) |
+| State Bank of Vietnam | Refinancing rate | TradingEconomics (scraped) |
 
 The Fed, ECB, and BOE have clean official data feeds and should stay
-reliable long-term. BOJ, PBOC, and SBV don't publish a clean English API,
-so those three grab a best-effort headline/link from their site instead —
-if one of them starts reporting "unavailable", the site's markup probably
-changed; check the matching `fetch_*` function in
-`interest_rate_emailer.py`.
+reliable long-term. BOJ, PBOC, and SBV don't publish a clean, scrapable
+English number on their own sites — BOJ's decisions are PDFs with no rate
+in the surrounding page text, PBOC's English news index mixes unrelated
+headlines in with rate releases, and SBV's site is a noisy multi-widget
+portal. Those three are instead read from
+[TradingEconomics](https://tradingeconomics.com), which reports every
+country's benchmark rate in the same plain-English sentence format
+("The benchmark interest rate in X was last recorded at Y percent"), which
+is far more reliably parsed than three differently-structured government
+sites. If one of them starts reporting "unavailable", that sentence format
+probably changed; check `fetch_te_rate()` in `interest_rate_emailer.py`.
+TradingEconomics doesn't offer a free public API, hence the scrape — if you'd
+rather use an authoritative source per bank, each one's official site is
+still linked in the email footer.
 
 If any single source fails to fetch, only that line notes the failure —
 the rest of the email still generates and sends normally.
@@ -67,27 +76,14 @@ the rest of the email still generates and sends normally.
 That's it — from now on it runs automatically on the schedule below, with
 no computer of yours needing to be on.
 
-## Changing the schedule
-
-Open `.github/workflows/send-interest-rate.yml` and edit this line:
+## Schedule
 
 ```
-- cron: "0 1 * * *"
+- cron: "*/30 * * * *"
 ```
 
-Cron format is `minute hour day month weekday`, always in **UTC**. Examples:
-
-- `0 1 * * *` -> once a day at 1am UTC (8am Vietnam, current setting)
-- `0 */6 * * *` -> every 6 hours
-- `0 1 * * 1` -> once a week, Monday 1am UTC
-
-A handy converter: https://crontab.guru (shows what a cron string means, but
-you still need to convert your local time to UTC yourself, e.g. via
-https://www.timeanddate.com/worldclock/converter.html)
-
-Central bank rates only change a handful of times a year, so a daily or
-even weekly schedule is plenty — there's no need to poll every 30 minutes
-like the price-emailer repos.
+Runs every 30 minutes (cron is always in UTC), matching the cadence of the
+other `*-emailer` repos. This line should not be changed.
 
 ## Only emailing on rate changes
 
