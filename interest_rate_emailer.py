@@ -314,11 +314,24 @@ def save_rates(results):
         json.dump(snapshot, f)
 
 
+def prev_entry(previous_rates, name):
+    """Backward-compat: state files written before this version stored a
+    flat rate string per bank ({name: "4.5%"}) rather than a
+    {"policy": ..., "deposit": ...} dict. Treat those old-format entries as
+    "no previous data" for that bank instead of crashing - there's no way
+    to know whether the old string was the policy or the deposit rate.
+    """
+    if not previous_rates:
+        return {}
+    prev = previous_rates.get(name)
+    return prev if isinstance(prev, dict) else {}
+
+
 def has_changed(results, previous_rates):
     if previous_rates is None:
         return True
     for name, r in results.items():
-        prev = previous_rates.get(name, {})
+        prev = prev_entry(previous_rates, name)
         if r["policy"].get("ok") and prev.get("policy") != r["policy"]["rate"]:
             return True
         if r["deposit"].get("ok") and prev.get("deposit") != r["deposit"]["rate"]:
@@ -367,7 +380,7 @@ def format_email_body(results, previous_rates):
 
     for name, _url in SOURCES:
         r = results.get(name, {"policy": {}, "deposit": {}})
-        prev = (previous_rates or {}).get(name, {})
+        prev = prev_entry(previous_rates, name)
         policy_cell = cell(r.get("policy", {}), prev.get("policy"))
         deposit_cell = cell(r.get("deposit", {}), prev.get("deposit"))
         lines.append(f"{name:<24} | {policy_cell:<28} | {deposit_cell}")
@@ -427,7 +440,7 @@ def format_email_html(results, previous_rates):
     rows_html = []
     for i, (name, _url) in enumerate(SOURCES):
         r = results.get(name, {"policy": {}, "deposit": {}})
-        prev = (previous_rates or {}).get(name, {})
+        prev = prev_entry(previous_rates, name)
         border = "" if i == len(SOURCES) - 1 else "border-bottom:1px solid #f0f1f3;"
         row = f"""
             <tr>
