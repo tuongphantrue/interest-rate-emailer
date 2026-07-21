@@ -120,6 +120,15 @@ DEPOSIT_SOURCES = [
     for name, slug in DEPOSIT_SLUGS.items()
 ]
 
+# Specific commercial banks, as opposed to the country-level averages above.
+# Both banks' rate pages are populated by client-side JS (confirmed empty in
+# the raw HTML), so these require a headless browser rather than a plain
+# requests.get() - see fetch_vietcombank_rate/fetch_techcombank_rate below.
+COMMERCIAL_BANK_SOURCES = [
+    ("Vietcombank", "https://www.vietcombank.com.vn/en/Personal/Cong-cu-Tien-ich/KHCN---Lai-suat"),
+    ("Techcombank", "https://techcombank.com/en/tools-utilities/interest-rates"),
+]
+
 # --- Scrape helpers ----------------------------------------------------------
 
 
@@ -283,6 +292,98 @@ FETCHERS = [
     ("State Bank of Vietnam", fetch_sbv_rate),
 ]
 
+# --- Commercial bank fetchers (headless browser) -----------------------------
+#
+# Both Vietcombank's and Techcombank's rate pages return genuinely empty
+# table cells in the raw HTML response - their numbers are populated by
+# client-side JavaScript after the page loads, confirmed by fetching both
+# pages directly. A plain requests.get() (everything above this point)
+# cannot see that data, so these two use Playwright to render the page in
+# a real (headless) browser first, then parse the resulting HTML.
+#
+# This is meaningfully heavier than every other fetcher in this file: it
+# needs the `playwright` package AND its browser binary installed (see
+# requirements.txt and the "Install Playwright browser" workflow step),
+# and each call takes several seconds instead of a fraction of one.
+
+
+def render_js_page(url, wait_selector=None, timeout_ms=30000, settle_ms=3000):
+    """Loads a page with a headless Chromium browser and returns the fully
+    rendered HTML, for pages whose content is populated by client-side JS
+    (confirmed necessary for both bank pages below - see module note above).
+    `settle_ms` is extra idle time after "networkidle" for slow AJAX widgets
+    that finish their network calls but still take a moment to paint.
+    """
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            page = browser.new_page(user_agent=HEADERS["User-Agent"])
+            page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+            if wait_selector:
+                page.wait_for_selector(wait_selector, timeout=timeout_ms)
+            page.wait_for_timeout(settle_ms)
+            return page.content()
+        finally:
+            browser.close()
+
+
+def fetch_vietcombank_rate():
+    """Vietcombank's 12-month VND savings rate - the tenor most commonly
+    used when comparing Vietnamese banks (see the 12-month comparisons
+    Vietnamese financial press runs every month). Renders the page with a
+    headless browser, then reads the now-populated rate table for the row
+    whose term is "12" and takes its VND column.
+    """
+    rendered_html = render_js_page(
+        "https://www.vietcombank.com.vn/en/Personal/Cong-cu-Tien-ich/KHCN---Lai-suat",
+        wait_selector="table",
+    )
+    soup = BeautifulSoup(rendered_html, "html.parser")
+    table = soup.find("table")
+    if not table:
+        raise RuntimeError("Rate table not found after page render - markup may have changed")
+
+    for row in table.find_all("tr"):
+        cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
+        if not cells:
+            continue
+        if re.search(r"\b12\b", cells[0]):
+            for cell in cells[1:]:
+                if re.search(r"\d", cell):
+                    rate = cell if "%" in cell else f"{cell}%"
+                    return {"rate": rate, "as_of": now_vn().strftime("%Y-%m-%d")}
+    raise RuntimeError("12-month VND row not found in rendered table")
+
+
+def fetch_techcombank_rate():
+    """Techcombank's 12-month VND savings rate. Techcombank's page renders
+    as product cards rather than one simple table (confirmed via direct
+    fetch: the raw HTML has empty icon placeholders where the rates widget
+    mounts), so this does a best-effort text search for a 12-month figure
+    in the rendered page instead of a fixed table position. More likely
+    than the Vietcombank fetcher to need a follow-up tweak once real output
+    is visible from an actual run - flagging that rather than pretending
+    otherwise.
+    """
+    rendered_html = render_js_page("https://techcombank.com/en/tools-utilities/interest-rates")
+    soup = BeautifulSoup(rendered_html, "html.parser")
+    text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
+
+    match = re.search(r"12[\s-]?months?[^%]{0,20}?(\d{1,2}(?:\.\d{1,2})?)\s?%", text, re.I)
+    if not match:
+        match = re.search(r"(\d{1,2}(?:\.\d{1,2})?)\s?%[^%]{0,20}?12[\s-]?months?", text, re.I)
+    if not match:
+        raise RuntimeError("12-month rate not found after page render - markup may have changed")
+    return {"rate": f"{match.group(1)}%", "as_of": now_vn().strftime("%Y-%m-%d")}
+
+
+COMMERCIAL_BANK_FETCHERS = [
+    ("Vietcombank", fetch_vietcombank_rate),
+    ("Techcombank", fetch_techcombank_rate),
+]
+
 # --- State (for change detection) --------------------------------------------
 
 
@@ -301,40 +402,57 @@ def load_previous_rates():
 
 
 def save_rates(results):
-    snapshot = {}
-    for name, r in results.items():
+    snapshot = {"central_banks": {}, "commercial_banks": {}}
+    for name, r in results.get("central_banks", {}).items():
         entry = {}
         if r["policy"].get("ok"):
             entry["policy"] = r["policy"]["rate"]
         if r["deposit"].get("ok"):
             entry["deposit"] = r["deposit"]["rate"]
         if entry:
-            snapshot[name] = entry
+            snapshot["central_banks"][name] = entry
+    for name, r in results.get("commercial_banks", {}).items():
+        if r.get("ok"):
+            snapshot["commercial_banks"][name] = r["rate"]
     with open(STATE_FILE, "w") as f:
         json.dump(snapshot, f)
 
 
 def prev_entry(previous_rates, name):
-    """Backward-compat: state files written before this version stored a
-    flat rate string per bank ({name: "4.5%"}) rather than a
-    {"policy": ..., "deposit": ...} dict. Treat those old-format entries as
-    "no previous data" for that bank instead of crashing - there's no way
-    to know whether the old string was the policy or the deposit rate.
+    """Backward-compat across two prior state-file formats: the oldest
+    stored a flat rate string per bank ({name: "4.5%"}); the version right
+    before this one stored {name: {"policy": ..., "deposit": ...}} at the
+    top level (no central/commercial split). Both are handled below so
+    neither crashes - old-format entries are treated as "no previous data"
+    for that bank rather than guessed at.
     """
     if not previous_rates:
         return {}
+    section = previous_rates.get("central_banks")
+    if isinstance(section, dict) and isinstance(section.get(name), dict):
+        return section[name]
     prev = previous_rates.get(name)
     return prev if isinstance(prev, dict) else {}
+
+
+def prev_commercial_rate(previous_rates, name):
+    if not previous_rates:
+        return None
+    section = previous_rates.get("commercial_banks")
+    return section.get(name) if isinstance(section, dict) else None
 
 
 def has_changed(results, previous_rates):
     if previous_rates is None:
         return True
-    for name, r in results.items():
+    for name, r in results.get("central_banks", {}).items():
         prev = prev_entry(previous_rates, name)
         if r["policy"].get("ok") and prev.get("policy") != r["policy"]["rate"]:
             return True
         if r["deposit"].get("ok") and prev.get("deposit") != r["deposit"]["rate"]:
+            return True
+    for name, r in results.get("commercial_banks", {}).items():
+        if r.get("ok") and prev_commercial_rate(previous_rates, name) != r["rate"]:
             return True
     return False
 
@@ -353,7 +471,7 @@ def _try_fetch(fetcher, name, label):
 
 
 def collect_rates():
-    results = {}
+    central_banks = {}
     for name, fetcher in FETCHERS:
         policy = _try_fetch(fetcher, name, "policy rate")
         slug = DEPOSIT_SLUGS.get(name)
@@ -361,8 +479,13 @@ def collect_rates():
             deposit = _try_fetch(lambda slug=slug: fetch_te_deposit_rate(slug), name, "deposit rate")
         else:
             deposit = {"ok": False, "error": "no deposit source configured"}
-        results[name] = {"policy": policy, "deposit": deposit}
-    return results
+        central_banks[name] = {"policy": policy, "deposit": deposit}
+
+    commercial_banks = {}
+    for name, fetcher in COMMERCIAL_BANK_FETCHERS:
+        commercial_banks[name] = _try_fetch(fetcher, name, "deposit rate")
+
+    return {"central_banks": central_banks, "commercial_banks": commercial_banks}
 
 
 def is_stale_annual(as_of):
@@ -379,6 +502,9 @@ def is_stale_annual(as_of):
 
 
 def format_email_body(results, previous_rates):
+    central_banks = results.get("central_banks", {})
+    commercial_banks = results.get("commercial_banks", {})
+
     lines = [f"Central bank interest rates - {now_vn().strftime('%Y-%m-%d %H:%M')}\n"]
     lines.append(f"{'Central bank':<24} | {'Policy rate':<28} | {'Deposit rate'}")
     lines.append("-" * 95)
@@ -394,7 +520,7 @@ def format_email_body(results, previous_rates):
         return f"unavailable ({d.get('error', 'unknown error')})"
 
     for name, _url in SOURCES:
-        r = results.get(name, {"policy": {}, "deposit": {}})
+        r = central_banks.get(name, {"policy": {}, "deposit": {}})
         prev = prev_entry(previous_rates, name)
         policy_cell = cell(r.get("policy", {}), prev.get("policy"))
         deposit_cell = cell(r.get("deposit", {}), prev.get("deposit"))
@@ -405,6 +531,15 @@ def format_email_body(results, previous_rates):
     lines.append("Deposit rate = average rate commercial banks pay savers - usually higher.")
     lines.append("Deposit rate is a national average (sometimes only updated annually), not")
     lines.append("any specific bank's current advertised rate, which may run higher or lower.")
+
+    lines.append("")
+    lines.append(f"Vietnam commercial banks - 12-month VND savings rate")
+    lines.append("-" * 95)
+    for name, _url in COMMERCIAL_BANK_SOURCES:
+        r = commercial_banks.get(name, {})
+        prev_val = prev_commercial_rate(previous_rates, name)
+        lines.append(f"{name:<24} | {cell(r, prev_val)}")
+
     lines.append("")
     lines.append("Policy rate sources:")
     for name, url in SOURCES:
@@ -412,6 +547,10 @@ def format_email_body(results, previous_rates):
     lines.append("")
     lines.append("Deposit rate sources:")
     for name, url in DEPOSIT_SOURCES:
+        lines.append(f"  {name}: {url}")
+    lines.append("")
+    lines.append("Commercial bank sources:")
+    for name, url in COMMERCIAL_BANK_SOURCES:
         lines.append(f"  {name}: {url}")
 
     return "\n".join(lines)
@@ -457,9 +596,12 @@ def format_email_html(results, previous_rates):
                 {badge(err, "#fee2e2", "#991b1b")}
               </td>"""
 
+    central_banks = results.get("central_banks", {})
+    commercial_banks = results.get("commercial_banks", {})
+
     rows_html = []
     for i, (name, _url) in enumerate(SOURCES):
-        r = results.get(name, {"policy": {}, "deposit": {}})
+        r = central_banks.get(name, {"policy": {}, "deposit": {}})
         prev = prev_entry(previous_rates, name)
         border = "" if i == len(SOURCES) - 1 else "border-bottom:1px solid #f0f1f3;"
         row = f"""
@@ -470,6 +612,19 @@ def format_email_html(results, previous_rates):
               {rate_cell(r.get('deposit', {}), prev.get('deposit'), border)}
             </tr>"""
         rows_html.append(row)
+
+    commercial_rows_html = []
+    for i, (name, _url) in enumerate(COMMERCIAL_BANK_SOURCES):
+        r = commercial_banks.get(name, {})
+        prev_val = prev_commercial_rate(previous_rates, name)
+        border = "" if i == len(COMMERCIAL_BANK_SOURCES) - 1 else "border-bottom:1px solid #f0f1f3;"
+        row = f"""
+            <tr>
+              <td style="padding:14px 20px;{border}vertical-align:top;font-family:{FONT_STACK};
+                         font-size:14px;font-weight:600;color:#111827;width:30%;">{esc(name)}</td>
+              {rate_cell(r, prev_val, border)}
+            </tr>"""
+        commercial_rows_html.append(row)
 
     def sources_block(title, source_list):
         rows = "".join(
@@ -538,6 +693,32 @@ def format_email_html(results, previous_rates):
           <td style="padding:16px 24px 22px;">
             {sources_block("Policy rate sources", SOURCES)}
             {sources_block("Deposit rate sources", DEPOSIT_SOURCES)}
+          </td>
+        </tr>
+      </table>
+      <table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0"
+             style="max-width:640px;width:100%;background:#ffffff;border-radius:12px;
+                    overflow:hidden;border:1px solid #e5e7eb;margin-top:20px;">
+        <tr>
+          <td style="background:#1f2937;padding:16px 24px;">
+            <div style="font-family:{FONT_STACK};font-size:15px;font-weight:700;color:#ffffff;">
+              Vietnam Commercial Banks
+            </div>
+            <div style="font-family:{FONT_STACK};font-size:12px;color:#9ca3af;margin-top:2px;">
+              12-month VND savings rate
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+              {"".join(commercial_rows_html)}
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:16px 24px 22px;">
+            {sources_block("Sources", COMMERCIAL_BANK_SOURCES)}
           </td>
         </tr>
       </table>
