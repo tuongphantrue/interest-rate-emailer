@@ -48,6 +48,16 @@ it's a useful ballpark for "what banks generally pay," not a specific
 promotional rate any one bank is currently advertising. A specific bank's
 current term-deposit rate can run higher or lower than this average.
 
+**Vietnam specifically**: TradingEconomics' deposit-rate figure for
+Vietnam is stuck on a 2023 World Bank data point (4.78%) as of when this
+was written — there's no more recent free, cleanly-scrapable figure for
+it. If you've seen banks advertise 6-8% on VND term deposits, that's not
+wrong; it's just a different, more current number than the stale national
+average this repo can automate. The email flags any deposit rate that's a
+bare annual figure more than a year old with an "annual figure, may be
+outdated" badge, specifically so this one doesn't get mistaken for a
+current number.
+
 If any single source fails to fetch, only that line notes the failure —
 the rest of the email still generates and sends normally.
 
