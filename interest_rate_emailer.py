@@ -365,6 +365,19 @@ def collect_rates():
     return results
 
 
+def is_stale_annual(as_of):
+    """True when as_of is a bare year (e.g. "2023") more than a year old.
+    Some countries' deposit rate (Vietnam included) only gets a World-Bank
+    annual update rather than a monthly one, so a scrape can return a real,
+    correctly-parsed figure that's nonetheless a couple of years old - this
+    flags that so it isn't mistaken for a current number.
+    """
+    match = re.fullmatch(r"\d{4}", (as_of or "").strip())
+    if not match:
+        return False
+    return int(match.group()) < now_vn().year - 1
+
+
 def format_email_body(results, previous_rates):
     lines = [f"Central bank interest rates - {now_vn().strftime('%Y-%m-%d %H:%M')}\n"]
     lines.append(f"{'Central bank':<24} | {'Policy rate':<28} | {'Deposit rate'}")
@@ -373,6 +386,8 @@ def format_email_body(results, previous_rates):
     def cell(d, prev_val):
         if d.get("ok"):
             s = f"{d['rate']} ({d['as_of']})"
+            if is_stale_annual(d["as_of"]):
+                s += " [annual figure, may be outdated]"
             if prev_val and prev_val != d["rate"]:
                 s += f" [was {prev_val}]"
             return s
@@ -388,6 +403,8 @@ def format_email_body(results, previous_rates):
     lines.append("")
     lines.append("Note: policy rate = what the central bank charges commercial banks.")
     lines.append("Deposit rate = average rate commercial banks pay savers - usually higher.")
+    lines.append("Deposit rate is a national average (sometimes only updated annually), not")
+    lines.append("any specific bank's current advertised rate, which may run higher or lower.")
     lines.append("")
     lines.append("Policy rate sources:")
     for name, url in SOURCES:
@@ -424,11 +441,14 @@ def format_email_html(results, previous_rates):
             change_badge = ""
             if prev_val and prev_val != d["rate"]:
                 change_badge = "<br>" + badge(f"changed &middot; was {esc(prev_val)}", "#fef3c7", "#92400e")
+            stale_badge = ""
+            if is_stale_annual(d["as_of"]):
+                stale_badge = "<br>" + badge("annual figure &middot; may be outdated", "#e5e7eb", "#4b5563")
             return f"""
               <td style="padding:14px 20px;{border}vertical-align:top;font-family:{FONT_STACK};font-size:14px;">
                 <span style="font-weight:700;color:#111827;">{esc(d['rate'])}</span>
                 <div style="font-size:12px;color:#6b7280;margin-top:2px;">{esc(d.get('as_of',''))}</div>
-                {change_badge}
+                {stale_badge}{change_badge}
               </td>"""
         err = esc(d.get("error", "unknown error"))
         return f"""
@@ -509,6 +529,8 @@ def format_email_html(results, previous_rates):
               <strong style="color:#374151;">Policy rate</strong> = what the central bank charges
               commercial banks. <strong style="color:#374151;">Deposit rate</strong> = the average
               rate commercial banks pay savers - usually higher, and set independently by each bank.
+              It's a national average (sometimes only updated annually, flagged below when so), not
+              any one bank's current advertised rate, which may run higher or lower.
             </div>
           </td>
         </tr>
