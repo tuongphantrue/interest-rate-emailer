@@ -1,35 +1,52 @@
 # Central Bank Interest Rates -> Email (runs on GitHub Actions, no local computer needed)
 
-This repo emails you a daily summary of policy interest rates from six
-major central banks, automatically, using GitHub's free scheduled-workflow
-runners. Nothing needs to run on your own machine.
+This repo emails you a daily summary of **both** the policy rate and the
+average commercial bank deposit rate for six major economies,
+automatically, using GitHub's free scheduled-workflow runners. Nothing
+needs to run on your own machine.
 
-## Central banks tracked
+**Why two rates:** a central bank's policy rate (e.g. SBV's 4.5%
+refinancing rate) is what it charges *commercial banks* — it is not what
+those banks pay you as a saver or charge you as a borrower. Commercial
+deposit/lending rates are set independently by each bank based on market
+conditions, and are usually higher (that's why you might see a bank
+advertising 6-8% on a term deposit while the central bank's own rate sits
+at 4.5% — both numbers are correct, they're just different things). The
+email shows both side by side so that's clear at a glance.
 
-| Central bank | Rate | Source |
-|---|---|---|
-| US Federal Reserve | Fed Funds target rate | FRED API (needs a free key) |
-| European Central Bank | Main refinancing rate | ECB Statistical Data Warehouse API |
-| Bank of England | Bank Rate | BOE public statistics page |
-| Bank of Japan | Policy rate | TradingEconomics (scraped) |
-| People's Bank of China | Loan Prime Rate | TradingEconomics (scraped) |
-| State Bank of Vietnam | Refinancing rate | TradingEconomics (scraped) |
+## Rates tracked
 
-The Fed, ECB, and BOE have clean official data feeds and should stay
-reliable long-term. BOJ, PBOC, and SBV don't publish a clean, scrapable
-English number on their own sites — BOJ's decisions are PDFs with no rate
-in the surrounding page text, PBOC's English news index mixes unrelated
-headlines in with rate releases, and SBV's site is a noisy multi-widget
-portal. Those three are instead read from
-[TradingEconomics](https://tradingeconomics.com), which reports every
-country's benchmark rate in the same plain-English sentence format
-("The benchmark interest rate in X was last recorded at Y percent"), which
-is far more reliably parsed than three differently-structured government
-sites. If one of them starts reporting "unavailable", that sentence format
-probably changed; check `fetch_te_rate()` in `interest_rate_emailer.py`.
-TradingEconomics doesn't offer a free public API, hence the scrape — if you'd
-rather use an authoritative source per bank, each one's official site is
-still linked in the email footer.
+| Central bank | Policy rate | Deposit rate | Source |
+|---|---|---|---|
+| US Federal Reserve | Fed Funds target rate | Avg. commercial deposit rate | FRED API (policy, needs a free key) + TradingEconomics (deposit) |
+| European Central Bank | Main refinancing rate | Avg. commercial deposit rate | ECB Statistical Data Warehouse API (policy) + TradingEconomics (deposit) |
+| Bank of England | Bank Rate | Avg. commercial deposit rate | BOE public statistics page (policy) + TradingEconomics (deposit) |
+| Bank of Japan | Policy rate | Avg. commercial deposit rate | TradingEconomics (both, scraped) |
+| People's Bank of China | Loan Prime Rate | Avg. commercial deposit rate | TradingEconomics (both, scraped) |
+| State Bank of Vietnam | Refinancing rate | Avg. commercial deposit rate | TradingEconomics (both, scraped) |
+
+The Fed, ECB, and BOE have clean official data feeds for their *policy*
+rate and should stay reliable long-term. BOJ, PBOC, and SBV don't publish
+a clean, scrapable English number on their own sites — BOJ's decisions are
+PDFs with no rate in the surrounding page text, PBOC's English news index
+mixes unrelated headlines in with rate releases, and SBV's site is a noisy
+multi-widget portal. Those three (plus the *deposit* rate for all six
+economies, since none of the official sources above publish that) are
+instead read from [TradingEconomics](https://tradingeconomics.com), which
+reports every country's rates in the same plain-English sentence format
+regardless of country, which is far more reliably parsed than each site's
+own differently-structured page. If one of them starts reporting
+"unavailable", that sentence format probably changed; check
+`fetch_te_rate()` / `fetch_te_deposit_rate()` in `interest_rate_emailer.py`.
+TradingEconomics doesn't offer a free public API, hence the scrape — if
+you'd rather use an authoritative source per bank, each one's official
+site is still linked in the email footer.
+
+Note that "average commercial deposit rate" is a broad national average
+(often World-Bank-sourced and updated annually for smaller economies) —
+it's a useful ballpark for "what banks generally pay," not a specific
+promotional rate any one bank is currently advertising. A specific bank's
+current term-deposit rate can run higher or lower than this average.
 
 If any single source fails to fetch, only that line notes the failure —
 the rest of the email still generates and sends normally.
