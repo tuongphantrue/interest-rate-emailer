@@ -90,18 +90,12 @@ SOURCES = [
     ("US Federal Reserve", "https://fred.stlouisfed.org/series/DFEDTARU"),
     ("European Central Bank", "https://data.ecb.europa.eu/data/datasets/FM"),
     ("Bank of England", "https://www.bankofengland.co.uk/monetary-policy/the-interest-rate-bank-rate"),
-    ("Bank of Japan", "https://www.boj.or.jp/en/mopo/mpmdeci/state_all/index.htm"),
-    ("People's Bank of China", "http://www.pbc.gov.cn/english/130721/index.html"),
-    ("State Bank of Vietnam", "https://www.sbv.gov.vn/webcenter/portal/en/home/rm/ir"),
+    ("Bank of Japan", "https://tradingeconomics.com/japan/interest-rate"),
+    ("People's Bank of China", "https://tradingeconomics.com/china/interest-rate"),
+    ("State Bank of Vietnam", "https://tradingeconomics.com/vietnam/interest-rate"),
 ]
 
-# --- Scrape helpers (BOJ/PBOC/SBV don't publish clean APIs) -----------------
-
-NAV_JUNK = {
-    "skip to main content", "skip to content", "home", "back", "top",
-    "next", "previous", "menu", "search", "close", "sign in", "login",
-    "english", "vietnamese", "japanese", "chinese",
-}
+# --- Scrape helpers ----------------------------------------------------------
 
 
 def fix_encoding(resp):
@@ -111,40 +105,6 @@ def fix_encoding(resp):
     if not resp.encoding or resp.encoding.lower() == "iso-8859-1":
         resp.encoding = resp.apparent_encoding
     return resp
-
-
-def strip_chrome(soup):
-    """Remove nav/header/footer/script chrome so we don't accidentally pick
-    up a "Skip to main content" link or a breadcrumb trail as the content.
-    """
-    for tag in soup.find_all(["nav", "header", "footer", "script", "style", "noscript"]):
-        tag.decompose()
-    for tag in soup.find_all(attrs={"class": re.compile(r"nav|menu|header|footer|breadcrumb|skip", re.I)}):
-        tag.decompose()
-    for tag in soup.find_all(attrs={"id": re.compile(r"nav|menu|header|footer|breadcrumb|skip", re.I)}):
-        tag.decompose()
-    return soup
-
-
-def find_rate_snippet(soup):
-    """Looks for a short snippet of real text containing a percent figure
-    (e.g. "...LPR was kept at 3.0%...") after stripping page chrome. Falls
-    back to the first substantial, non-nav link text if no percent figure
-    is found on the page at all.
-    """
-    strip_chrome(soup)
-    text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
-    # Split into sentences rather than using a "stop at the next period"
-    # character class, which would cut off decimals like "3.5%" mid-number.
-    sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z(])", text)
-    for sentence in sentences:
-        if re.search(r"\d{1,2}(?:\.\d{1,2})?\s?%", sentence):
-            return sentence.strip()[:220]
-    for a in soup.find_all("a"):
-        t = a.get_text(strip=True)
-        if t and len(t) >= 15 and t.lower() not in NAV_JUNK:
-            return t
-    return None
 
 
 # --- Fetch --------------------------------------------------------------------
@@ -199,66 +159,53 @@ def fetch_boe_rate():
     return {"rate": f"{value}%", "as_of": date}
 
 
-def fetch_boj_rate():
-    """Bank of Japan policy rate - reads the official statements table for
-    the current year (falling back to last year in January) and returns the
-    latest statement's title + date. BOJ's statements are PDFs without a
-    numeric rate in the page text itself, so this reports the release
-    rather than a parsed percentage - see the README for why.
+def fetch_te_rate(country_slug):
+    """Fetches a country's benchmark rate from TradingEconomics, which
+    reports it as one consistent plain-English sentence across every
+    country page (unlike BOJ/PBOC/SBV's own sites, which are either
+    multi-table PDF listings, mixed news feeds, or noisy nav-heavy portals).
+
+    Looks for: "The benchmark interest rate in <Country> was last recorded
+    at X percent." plus the reference month from the indicators table.
     """
-    for year in (now_vn().year, now_vn().year - 1):
-        url = f"https://www.boj.or.jp/en/mopo/mpmdeci/state_{year}/index.htm"
-        try:
-            resp = requests.get(url, headers=HEADERS, timeout=15)
-            resp.raise_for_status()
-        except requests.exceptions.HTTPError:
-            continue
-        fix_encoding(resp)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        strip_chrome(soup)
-        table = soup.find("table")
-        if not table:
-            continue
-        rows = [r for r in table.find_all("tr") if r.find_all("td")]
-        if not rows:
-            continue
-        cells = rows[0].find_all("td")
-        date_text = cells[0].get_text(strip=True)
-        title_text = cells[1].get_text(" ", strip=True)
-        return {"rate": title_text, "as_of": date_text}
-    raise RuntimeError("No statements table found for current or previous year")
+    url = f"https://tradingeconomics.com/{country_slug}/interest-rate"
+    resp = requests.get(url, headers=HEADERS, timeout=15)
+    resp.raise_for_status()
+    fix_encoding(resp)
+    soup = BeautifulSoup(resp.text, "html.parser")
+    text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
+
+    rate_match = re.search(r"was last recorded at ([\d.]+)\s*percent", text, re.I)
+    if not rate_match:
+        raise RuntimeError("Rate sentence not found - page markup may have changed")
+
+    as_of_match = re.search(
+        r"Interest Rate\s+[\d.]+\s+[\d.]+\s+percent\s+([A-Za-z]{3,9}\.?\s+\d{4})", text
+    )
+    as_of = as_of_match.group(1) if as_of_match else now_vn().strftime("%Y-%m-%d")
+
+    return {"rate": f"{rate_match.group(1)}%", "as_of": as_of}
+
+
+def fetch_boj_rate():
+    """Bank of Japan policy rate, via TradingEconomics (BOJ's own decisions
+    are published as PDFs with no numeric rate in the surrounding page text,
+    so the official site can't be scraped for a clean number - see README)."""
+    return fetch_te_rate("japan")
 
 
 def fetch_pboc_rate():
-    """PBOC Loan Prime Rate - best-effort scrape of the English news index.
-    Fixes response encoding (the page was rendering as mojibake without
-    this) and strips nav chrome before looking for a percent figure.
-    """
-    url = "http://www.pbc.gov.cn/english/130721/index.html"
-    resp = requests.get(url, headers=HEADERS, timeout=15)
-    resp.raise_for_status()
-    fix_encoding(resp)
-    soup = BeautifulSoup(resp.text, "html.parser")
-    snippet = find_rate_snippet(soup)
-    if not snippet:
-        raise RuntimeError("No rate figure or headline found - page markup may have changed")
-    return {"rate": snippet, "as_of": now_vn().strftime("%Y-%m-%d")}
+    """PBOC Loan Prime Rate, via TradingEconomics (PBOC's own English news
+    index mixes unrelated headlines with rate releases and isn't reliably
+    scrapable for just the rate - see README)."""
+    return fetch_te_rate("china")
 
 
 def fetch_sbv_rate():
-    """State Bank of Vietnam refinancing rate - best-effort scrape of the
-    rates page. Strips nav/breadcrumb chrome and looks for a percent figure
-    instead of dumping the raw page text.
-    """
-    url = "https://www.sbv.gov.vn/webcenter/portal/en/home/rm/ir"
-    resp = requests.get(url, headers=HEADERS, timeout=15)
-    resp.raise_for_status()
-    fix_encoding(resp)
-    soup = BeautifulSoup(resp.text, "html.parser")
-    snippet = find_rate_snippet(soup)
-    if not snippet:
-        raise RuntimeError("No rate figure or headline found - page markup may have changed")
-    return {"rate": snippet, "as_of": now_vn().strftime("%Y-%m-%d")}
+    """State Bank of Vietnam refinancing rate, via TradingEconomics (SBV's
+    own portal is a noisy multi-widget page that doesn't reliably surface
+    just the rate figure - see README)."""
+    return fetch_te_rate("vietnam")
 
 
 FETCHERS = [
