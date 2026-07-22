@@ -58,45 +58,43 @@ bare annual figure more than a year old with an "annual figure, may be
 outdated" badge, specifically so this one doesn't get mistaken for a
 current number.
 
-## Vietnam commercial banks (Vietcombank, Techcombank)
+## Vietnam commercial banks (10 banks)
 
 Because the national-average deposit rate above isn't the number most
 people actually want, the email also has a second section with each
 bank's own advertised **12-month VND savings rate** (the tenor Vietnamese
-financial press typically uses when comparing banks).
+financial press typically uses when comparing banks), for:
 
-This is a meaningfully heavier feature than everything else in this repo:
+Vietcombank, Techcombank, BIDV, VietinBank, MB Bank, ACB, VPBank,
+Sacombank, HDBank, and TPBank.
 
-- **A headless browser is required.** Both banks' rate pages return
-  genuinely empty table cells in their raw HTML — the actual numbers are
-  populated by client-side JavaScript after the page loads. This was
-  confirmed by fetching both pages directly: the raw HTML literally has no
-  digits in it. Every other fetcher in this file uses a plain
-  `requests.get()`; these two use [Playwright](https://playwright.dev) to
-  render the page in a real headless Chromium instance first.
-- **This adds real cost and time.** Every run now installs Playwright's
-  Chromium binary (cached between runs via `actions/cache` so it doesn't
-  re-download every time, but the browser itself still needs to launch,
-  load two pages, and wait for their JS to settle) and takes noticeably
-  longer than the rest of the script combined. Since the schedule runs
-  every 30 minutes, this is worth being aware of against GitHub Actions'
-  free-tier minutes.
-- **Techcombank's fetcher is more likely to need a tweak.** Vietcombank's
-  page is a straightforward rendered table (read the row labeled "12"),
-  which is fairly stable. Techcombank's page renders as a set of product
-  cards (Phat Loc Savings, Flexible Savings, etc.) rather than one simple
-  table, so its fetcher does a best-effort text search for a 12-month
-  figure instead of a fixed table position — more likely to break if
-  Techcombank redesigns that page. If it starts reporting "unavailable",
-  check `fetch_techcombank_rate()` in `interest_rate_emailer.py` against
-  the site's current layout.
-- **Both banks offer other terms, online-only rates, and promotions** not
-  captured here (e.g. Vietcombank's site itself notes rates can run
-  higher for online deposits or short-term promotions). The 12-month
-  counter rate is a reasonable single number for comparison, not
-  necessarily the *best* rate either bank currently offers.
+**All ten are read from one source: [24hmoney.vn](https://24hmoney.vn)'s
+per-bank rate page**, not each bank's own site. This wasn't the first
+approach tried — Vietcombank's own rate page turned out to be populated by
+client-side JavaScript (empty in the raw HTML), and Techcombank's
+equivalent page is an interactive calculator with no static table at all,
+both of which needed increasingly heavy workarounds (a headless browser,
+then PDF-parsing) that were fragile and slow. 24hmoney.vn's page is plain
+server-rendered HTML — the numbers are present in the raw HTTP response,
+confirmed directly — with the *same* table format for every bank, so one
+simple `requests.get()` (no browser, no PDF library) now covers all ten.
 
-If any single source fails to fetch, only that line notes the failure —
+Each bank's page has two tables: "tại Quầy" (at the counter — the
+standard, walk-in rate) and "Trực tuyến" (online, usually a bit higher).
+The fetcher reads the counter table specifically, then the row labeled
+"12" (months). If a bank's page layout changes and the row can't be
+found, the error includes a snippet of what the page actually contained,
+so a failure is diagnosable from the email itself rather than requiring
+another round of guessing — check `fetch_bank_deposit_rate()` in
+`interest_rate_emailer.py` against whatever that snippet shows.
+
+Each bank also offers other terms, online-only promotions, and
+balance-tiered rates not captured here — the 12-month counter rate is a
+reasonable single number for comparison, not necessarily the *best* rate
+any given bank currently offers (24hmoney.vn's own page, linked in the
+email, has the full table per bank).
+
+If any single bank fails to fetch, only that line notes the failure —
 the rest of the email still generates and sends normally.
 
 ## One-time setup (~5 minutes)
@@ -183,7 +181,6 @@ If you'd rather run this on your own machine instead of GitHub Actions:
 
 ```
 pip install -r requirements.txt
-playwright install --with-deps chromium
 export FRED_API_KEY="your_fred_key"
 export GMAIL_ADDRESS="you@gmail.com"
 export GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"
