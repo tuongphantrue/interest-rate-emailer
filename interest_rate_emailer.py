@@ -308,12 +308,22 @@ FETCHERS = [
 # and each call takes several seconds instead of a fraction of one.
 
 
-def render_js_page(url, wait_selector=None, timeout_ms=30000, settle_ms=3000, attempts=3):
+def render_js_page(url, wait_selector=None, goto_timeout_ms=20000, selector_timeout_ms=25000,
+                    settle_ms=3000, attempts=3):
     """Loads a page with a headless Chromium browser and returns the fully
     rendered HTML, for pages whose content is populated by client-side JS
     (confirmed necessary for both bank pages below - see module note above).
-    `settle_ms` is extra idle time after "networkidle" for slow AJAX widgets
-    that finish their network calls but still take a moment to paint.
+    `settle_ms` is extra idle time after the wait_selector appears, for slow
+    AJAX widgets that resolve but still take a moment to paint.
+
+    Uses "domcontentloaded" rather than "networkidle"/"load" as the primary
+    wait condition: those two wait for ALL page resources (analytics
+    beacons, trackers, live chat widgets, etc.) to finish, which is what
+    actually caused a 30s timeout on Vietcombank's page in practice even
+    though the table itself renders much sooner. Waiting for the DOM to be
+    ready, then separately waiting for the specific selector we need,
+    decouples "page finished loading everything" from "the content we
+    actually want is present" - the latter is both faster and more reliable.
 
     Retries with backoff and HTTP/2 disabled after the first attempt: some
     banking-site WAFs/CDNs respond to automated traffic with a raw
@@ -340,14 +350,9 @@ def render_js_page(url, wait_selector=None, timeout_ms=30000, settle_ms=3000, at
                         user_agent=HEADERS["User-Agent"],
                         extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
                     )
-                    try:
-                        page.goto(url, wait_until="networkidle", timeout=timeout_ms)
-                    except Exception:
-                        # networkidle can hang on pages with persistent polling;
-                        # fall back to a looser wait condition before giving up.
-                        page.goto(url, wait_until="load", timeout=timeout_ms)
+                    page.goto(url, wait_until="domcontentloaded", timeout=goto_timeout_ms)
                     if wait_selector:
-                        page.wait_for_selector(wait_selector, timeout=timeout_ms)
+                        page.wait_for_selector(wait_selector, timeout=selector_timeout_ms)
                     page.wait_for_timeout(settle_ms)
                     return page.content()
                 finally:
@@ -405,30 +410,74 @@ def fetch_vietcombank_rate():
 
 
 def fetch_techcombank_rate():
-    """Techcombank's 12-month VND savings rate. Techcombank's page renders
-    as product cards rather than one simple table (confirmed via direct
-    fetch: the raw HTML has empty icon placeholders where the rates widget
-    mounts), so this does a best-effort text search for a 12-month figure
-    in the rendered page instead of a fixed table position. More likely
-    than the Vietcombank fetcher to need a follow-up tweak once real output
-    is visible from an actual run - flagging that rather than pretending
-    otherwise.
-    """
-    rendered_html = render_js_page("https://techcombank.com/en/tools-utilities/interest-rates")
-    soup = BeautifulSoup(rendered_html, "html.parser")
-    text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
+    """Techcombank's 12-month VND savings rate, read from their own official
+    rate-sheet PDF (e.g. filenames like
+    "techcombank-bieu-lai-suat-tien-gui-tiet-kiem-tien-gui-co-ky-han-20260602.pdf")
+    rather than their interactive calculator widget. The calculator
+    requires filling in an amount and term and clicking through - a much
+    more fragile thing to automate than reading a static table - and
+    Techcombank already publishes the same numbers as a straightforward PDF.
 
-    # Accept "months"/"month" and Vietnamese "tháng" (in case the /en/ page
-    # still renders some Vietnamese, or a locale redirect happened).
-    term = r"(?:months?|th[aá]ng)"
-    match = re.search(rf"12[\s-]?{term}[^%]{{0,20}}?(\d{{1,2}}(?:\.\d{{1,2}})?)\s?%", text, re.I)
-    if not match:
-        match = re.search(rf"(\d{{1,2}}(?:\.\d{{1,2}})?)\s?%[^%]{{0,20}}?12[\s-]?{term}", text, re.I)
-    if not match:
+    The PDF's filename has a date stamp that changes every time Techcombank
+    updates it, so the link can't be hardcoded - this renders the rates hub
+    page once (still needs Playwright, since even that download link is
+    populated by JS) just to discover the current PDF URL, then downloads
+    and reads the PDF directly with plain requests + pypdf (no browser
+    needed for that part).
+
+    Picks the "Phat Loc Savings at Counter" product (Techcombank's standard
+    walk-in savings account, the closest equivalent to Vietcombank's plain
+    savings table), Normal Customer tier, under-3-billion-VND balance -
+    representative for an typical individual saver, not necessarily the
+    single highest rate Techcombank offers (Private/Priority tiers and
+    larger balances get more; see the PDF link in the email for the full
+    table).
+    """
+    import io
+    from urllib.parse import urljoin
+    from pypdf import PdfReader
+
+    hub_url = "https://techcombank.com/en/tools-utilities/interest-rates"
+    rendered_html = render_js_page(hub_url, wait_selector="a[href*='lai-suat-tien-gui-tiet-kiem']")
+    soup = BeautifulSoup(rendered_html, "html.parser")
+
+    pdf_link = soup.find("a", href=re.compile(r"lai-suat-tien-gui-tiet-kiem.*\.pdf", re.I))
+    if not pdf_link:
         raise RuntimeError(
-            f"12-month rate not found after page render. Page text sample: {diagnostic_snippet(soup)!r}"
+            f"Rate-sheet PDF link not found on hub page. Page text sample: {diagnostic_snippet(soup, r'pdf')!r}"
         )
-    return {"rate": f"{match.group(1)}%", "as_of": now_vn().strftime("%Y-%m-%d")}
+    pdf_url = urljoin(hub_url, pdf_link["href"])
+
+    pdf_resp = requests.get(pdf_url, headers=HEADERS, timeout=20)
+    pdf_resp.raise_for_status()
+    reader = PdfReader(io.BytesIO(pdf_resp.content))
+    pdf_text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    pdf_text = re.sub(r"[ \t]+", " ", pdf_text)
+
+    # Anchor to the "Phat Loc Savings at Counter" section specifically -
+    # the PDF has several products (Phat Loc counter/online, Flexible
+    # Savings, etc.), each with their own 12M row.
+    section_match = re.search(
+        r"PHAT LOC SAVINGS(?: AT COUNTER)?.*?(?=TIỀN GỬI|FLEXIBLE SAVINGS|$)",
+        pdf_text, re.I | re.S,
+    )
+    section = section_match.group(0) if section_match else pdf_text
+
+    # Row is "12M" followed by 12 decimal figures (4 customer tiers x 3
+    # balance tiers); the last one is Normal Customer / smallest balance.
+    row_match = re.search(r"\b12M\b\s*((?:\d\.\d{2}\s*){12})", section)
+    if not row_match:
+        raise RuntimeError(
+            f"12M row not found in Phat Loc Savings section of {pdf_url}. "
+            f"Text sample: {section[:300]!r}"
+        )
+    values = row_match.group(1).split()
+    rate = values[-1]
+
+    as_of_match = re.search(r"Effective from ([A-Za-z]+ \d{1,2}\s*,?\s*\d{4})", pdf_text)
+    as_of = as_of_match.group(1) if as_of_match else now_vn().strftime("%Y-%m-%d")
+
+    return {"rate": f"{rate}%", "as_of": as_of}
 
 
 COMMERCIAL_BANK_FETCHERS = [
