@@ -121,15 +121,6 @@ DEPOSIT_SOURCES = [
     for name, slug in DEPOSIT_SLUGS.items()
 ]
 
-# Specific commercial banks, as opposed to the country-level averages above.
-# Both banks' rate pages are populated by client-side JS (confirmed empty in
-# the raw HTML), so these require a headless browser rather than a plain
-# requests.get() - see fetch_vietcombank_rate/fetch_techcombank_rate below.
-COMMERCIAL_BANK_SOURCES = [
-    ("Vietcombank", "https://www.vietcombank.com.vn/en/Personal/Cong-cu-Tien-ich/KHCN---Lai-suat"),
-    ("Techcombank", "https://techcombank.com/en/tools-utilities/interest-rates"),
-]
-
 # --- Scrape helpers ----------------------------------------------------------
 
 
@@ -293,75 +284,42 @@ FETCHERS = [
     ("State Bank of Vietnam", fetch_sbv_rate),
 ]
 
-# --- Commercial bank fetchers (headless browser) -----------------------------
+# --- Commercial bank fetchers -------------------------------------------------
 #
-# Both Vietcombank's and Techcombank's rate pages return genuinely empty
-# table cells in the raw HTML response - their numbers are populated by
-# client-side JavaScript after the page loads, confirmed by fetching both
-# pages directly. A plain requests.get() (everything above this point)
-# cannot see that data, so these two use Playwright to render the page in
-# a real (headless) browser first, then parse the resulting HTML.
+# All ten banks below are read from 24hmoney.vn's per-bank rate page rather
+# than each bank's own site. This matters because each bank's own site
+# turned out to be a different kind of hostile to scrape: Vietcombank's
+# table is populated by client-side JS (empty in raw HTML), Techcombank's
+# equivalent page is an interactive calculator with no static table at all,
+# and the others were never individually researched because this aggregator
+# turned out to cover all of them uniformly. 24hmoney.vn's page is plain
+# server-rendered HTML - the numbers are present in the raw HTTP response,
+# confirmed by fetching it directly - so this needs nothing heavier than
+# requests + BeautifulSoup, the same as every central-bank fetcher above.
+# No headless browser, no PDF parsing.
 #
-# This is meaningfully heavier than every other fetcher in this file: it
-# needs the `playwright` package AND its browser binary installed (see
-# requirements.txt and the "Install Playwright browser" workflow step),
-# and each call takes several seconds instead of a fraction of one.
+# Each bank page has two tables: "tại Quầy" (at the counter - the standard,
+# walk-in rate) and "Trực tuyến" (online, usually a bit higher). This reads
+# the counter table specifically, for consistency with the previous
+# approach and with how Vietnamese financial press usually quotes rates.
 
+BANK_SLUGS = {
+    "Vietcombank": "vietcombank",
+    "Techcombank": "techcombank",
+    "BIDV": "bidv",
+    "VietinBank": "vietinbank",
+    "MB Bank": "mb",
+    "ACB": "acb",
+    "VPBank": "vpbank",
+    "Sacombank": "sacombank",
+    "HDBank": "hdbank",
+    "TPBank": "tpbank",
+}
 
-def render_js_page(url, wait_selector=None, goto_timeout_ms=20000, selector_timeout_ms=25000,
-                    settle_ms=3000, attempts=3):
-    """Loads a page with a headless Chromium browser and returns the fully
-    rendered HTML, for pages whose content is populated by client-side JS
-    (confirmed necessary for both bank pages below - see module note above).
-    `settle_ms` is extra idle time after the wait_selector appears, for slow
-    AJAX widgets that resolve but still take a moment to paint.
-
-    Uses "domcontentloaded" rather than "networkidle"/"load" as the primary
-    wait condition: those two wait for ALL page resources (analytics
-    beacons, trackers, live chat widgets, etc.) to finish, which is what
-    actually caused a 30s timeout on Vietcombank's page in practice even
-    though the table itself renders much sooner. Waiting for the DOM to be
-    ready, then separately waiting for the specific selector we need,
-    decouples "page finished loading everything" from "the content we
-    actually want is present" - the latter is both faster and more reliable.
-
-    Retries with backoff and HTTP/2 disabled after the first attempt: some
-    banking-site WAFs/CDNs respond to automated traffic with a raw
-    connection-level error (seen in practice as net::ERR_HTTP2_PROTOCOL_ERROR)
-    rather than a clean HTTP status, and disabling HTTP/2 works around that
-    on some sites' edge configurations. This may not fully solve it if the
-    real cause is IP-based bot detection rather than a protocol quirk - that
-    would need addressing outside this script (e.g. running from a
-    residential/non-datacenter IP), not something a retry can fix.
-    """
-    from playwright.sync_api import sync_playwright
-
-    last_error = None
-    for attempt in range(attempts):
-        disable_http2 = attempt > 0  # try normally first, then fall back
-        args = ["--no-sandbox"]
-        if disable_http2:
-            args.append("--disable-http2")
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True, args=args)
-                try:
-                    page = browser.new_page(
-                        user_agent=HEADERS["User-Agent"],
-                        extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-                    )
-                    page.goto(url, wait_until="domcontentloaded", timeout=goto_timeout_ms)
-                    if wait_selector:
-                        page.wait_for_selector(wait_selector, timeout=selector_timeout_ms)
-                    page.wait_for_timeout(settle_ms)
-                    return page.content()
-                finally:
-                    browser.close()
-        except Exception as e:
-            last_error = e
-            if attempt < attempts - 1:
-                time.sleep(5 * (attempt + 1))
-    raise last_error
+COMMERCIAL_BANK_SOURCES = [
+    (name, f"https://24hmoney.vn/lai-suat-gui-ngan-hang/{slug}")
+    for name, slug in BANK_SLUGS.items()
+]
 
 
 def diagnostic_snippet(soup, around_pattern=r"12"):
@@ -377,113 +335,46 @@ def diagnostic_snippet(soup, around_pattern=r"12"):
     return text[start:start + 300]
 
 
-def fetch_vietcombank_rate():
-    """Vietcombank's 12-month VND savings rate - the tenor most commonly
-    used when comparing Vietnamese banks (see the 12-month comparisons
-    Vietnamese financial press runs every month). Renders the page with a
-    headless browser, then reads the now-populated rate table for the row
-    whose term is "12" and takes its VND column.
+def fetch_bank_deposit_rate(bank_slug):
+    """Fetches a bank's 12-month VND savings rate (at-counter/standard
+    rate) from 24hmoney.vn's per-bank rate page - confirmed server-rendered
+    (no JavaScript needed) and using one consistent table format across
+    every bank tracked here.
     """
-    rendered_html = render_js_page(
-        "https://www.vietcombank.com.vn/en/Personal/Cong-cu-Tien-ich/KHCN---Lai-suat",
-        wait_selector="table",
+    url = f"https://24hmoney.vn/lai-suat-gui-ngan-hang/{bank_slug}"
+    resp = requests.get(url, headers=HEADERS, timeout=15)
+    resp.raise_for_status()
+    fix_encoding(resp)
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    counter_heading = soup.find(
+        lambda tag: tag.name in ("h2", "h3") and "Quầy" in tag.get_text()
     )
-    soup = BeautifulSoup(rendered_html, "html.parser")
-    table = soup.find("table")
+    table = counter_heading.find_next("table") if counter_heading else soup.find("table")
     if not table:
-        raise RuntimeError(
-            f"Rate table not found after page render. Page text sample: {diagnostic_snippet(soup)!r}"
-        )
+        raise RuntimeError(f"No rate table found. Page text sample: {diagnostic_snippet(soup)!r}")
+
+    as_of_match = re.search(r"th[aá]ng\s+(\d{2}/\d{4})", soup.get_text())
+    as_of = as_of_match.group(1) if as_of_match else now_vn().strftime("%Y-%m-%d")
 
     for row in table.find_all("tr"):
         cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
-        if not cells:
-            continue
-        if re.search(r"\b12\b", cells[0]):
-            for cell in cells[1:]:
-                if re.search(r"\d", cell):
-                    rate = cell if "%" in cell else f"{cell}%"
-                    return {"rate": rate, "as_of": now_vn().strftime("%Y-%m-%d")}
+        if len(cells) >= 2 and "12" in cells[0]:
+            rate = cells[1]
+            if not rate.endswith("%"):
+                rate += "%"
+            return {"rate": rate, "as_of": as_of}
+
     raise RuntimeError(
-        f"12-month VND row not found in rendered table. Page text sample: {diagnostic_snippet(soup)!r}"
+        f"12-month row not found in counter table. Page text sample: {diagnostic_snippet(soup)!r}"
     )
-
-
-def fetch_techcombank_rate():
-    """Techcombank's 12-month VND savings rate, read from their own official
-    rate-sheet PDF (e.g. filenames like
-    "techcombank-bieu-lai-suat-tien-gui-tiet-kiem-tien-gui-co-ky-han-20260602.pdf")
-    rather than their interactive calculator widget. The calculator
-    requires filling in an amount and term and clicking through - a much
-    more fragile thing to automate than reading a static table - and
-    Techcombank already publishes the same numbers as a straightforward PDF.
-
-    The PDF's filename has a date stamp that changes every time Techcombank
-    updates it, so the link can't be hardcoded - this renders the rates hub
-    page once (still needs Playwright, since even that download link is
-    populated by JS) just to discover the current PDF URL, then downloads
-    and reads the PDF directly with plain requests + pypdf (no browser
-    needed for that part).
-
-    Picks the "Phat Loc Savings at Counter" product (Techcombank's standard
-    walk-in savings account, the closest equivalent to Vietcombank's plain
-    savings table), Normal Customer tier, under-3-billion-VND balance -
-    representative for an typical individual saver, not necessarily the
-    single highest rate Techcombank offers (Private/Priority tiers and
-    larger balances get more; see the PDF link in the email for the full
-    table).
-    """
-    import io
-    from urllib.parse import urljoin
-    from pypdf import PdfReader
-
-    hub_url = "https://techcombank.com/en/tools-utilities/interest-rates"
-    rendered_html = render_js_page(hub_url, wait_selector="a[href*='lai-suat-tien-gui-tiet-kiem']")
-    soup = BeautifulSoup(rendered_html, "html.parser")
-
-    pdf_link = soup.find("a", href=re.compile(r"lai-suat-tien-gui-tiet-kiem.*\.pdf", re.I))
-    if not pdf_link:
-        raise RuntimeError(
-            f"Rate-sheet PDF link not found on hub page. Page text sample: {diagnostic_snippet(soup, r'pdf')!r}"
-        )
-    pdf_url = urljoin(hub_url, pdf_link["href"])
-
-    pdf_resp = requests.get(pdf_url, headers=HEADERS, timeout=20)
-    pdf_resp.raise_for_status()
-    reader = PdfReader(io.BytesIO(pdf_resp.content))
-    pdf_text = "\n".join(page.extract_text() or "" for page in reader.pages)
-    pdf_text = re.sub(r"[ \t]+", " ", pdf_text)
-
-    # Anchor to the "Phat Loc Savings at Counter" section specifically -
-    # the PDF has several products (Phat Loc counter/online, Flexible
-    # Savings, etc.), each with their own 12M row.
-    section_match = re.search(
-        r"PHAT LOC SAVINGS(?: AT COUNTER)?.*?(?=TIỀN GỬI|FLEXIBLE SAVINGS|$)",
-        pdf_text, re.I | re.S,
-    )
-    section = section_match.group(0) if section_match else pdf_text
-
-    # Row is "12M" followed by 12 decimal figures (4 customer tiers x 3
-    # balance tiers); the last one is Normal Customer / smallest balance.
-    row_match = re.search(r"\b12M\b\s*((?:\d\.\d{2}\s*){12})", section)
-    if not row_match:
-        raise RuntimeError(
-            f"12M row not found in Phat Loc Savings section of {pdf_url}. "
-            f"Text sample: {section[:300]!r}"
-        )
-    values = row_match.group(1).split()
-    rate = values[-1]
-
-    as_of_match = re.search(r"Effective from ([A-Za-z]+ \d{1,2}\s*,?\s*\d{4})", pdf_text)
-    as_of = as_of_match.group(1) if as_of_match else now_vn().strftime("%Y-%m-%d")
-
-    return {"rate": f"{rate}%", "as_of": as_of}
 
 
 COMMERCIAL_BANK_FETCHERS = [
-    ("Vietcombank", fetch_vietcombank_rate),
-    ("Techcombank", fetch_techcombank_rate),
+    (name, (lambda slug=slug: fetch_bank_deposit_rate(slug)))
+    for name, slug in BANK_SLUGS.items()
 ]
+
 
 # --- State (for change detection) --------------------------------------------
 
