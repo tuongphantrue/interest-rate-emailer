@@ -299,9 +299,8 @@ FETCHERS = [
 # No headless browser, no PDF parsing.
 #
 # Each bank page has two tables: "tại Quầy" (at the counter - the standard,
-# walk-in rate) and "Trực tuyến" (online, usually a bit higher). This reads
-# the counter table specifically, for consistency with the previous
-# approach and with how Vietnamese financial press usually quotes rates.
+# walk-in rate) and "Trực tuyến" (online, usually a bit higher - this is
+# what banking apps display, so it's what this reads).
 
 BANK_SLUGS = {
     "Vietcombank": "vietcombank",
@@ -336,10 +335,17 @@ def diagnostic_snippet(soup, around_pattern=r"12"):
 
 
 def fetch_bank_deposit_rate(bank_slug):
-    """Fetches a bank's 12-month VND savings rate (at-counter/standard
-    rate) from 24hmoney.vn's per-bank rate page - confirmed server-rendered
-    (no JavaScript needed) and using one consistent table format across
-    every bank tracked here.
+    """Fetches a bank's 12-month VND savings rate from 24hmoney.vn's
+    per-bank rate page - confirmed server-rendered (no JavaScript needed)
+    and using one consistent table format across every bank tracked here.
+
+    Reads the "Trực tuyến" (online) table rather than "tại Quầy" (at the
+    counter): banking apps show the online rate, which every major
+    Vietnamese bank lists noticeably higher than its walk-in counter rate
+    (that gap is the incentive to use the app/website instead of a
+    branch), so online is what actually matches "what my app shows".
+    Falls back to the counter table if a bank's page doesn't have a
+    separate online table.
     """
     url = f"https://24hmoney.vn/lai-suat-gui-ngan-hang/{bank_slug}"
     resp = requests.get(url, headers=HEADERS, timeout=15)
@@ -347,10 +353,14 @@ def fetch_bank_deposit_rate(bank_slug):
     fix_encoding(resp)
     soup = BeautifulSoup(resp.text, "html.parser")
 
+    online_heading = soup.find(
+        lambda tag: tag.name in ("h2", "h3") and re.search(r"[Tt]rực tuyến|[Oo]nline", tag.get_text())
+    )
     counter_heading = soup.find(
         lambda tag: tag.name in ("h2", "h3") and "Quầy" in tag.get_text()
     )
-    table = counter_heading.find_next("table") if counter_heading else soup.find("table")
+    heading = online_heading or counter_heading
+    table = heading.find_next("table") if heading else soup.find("table")
     if not table:
         raise RuntimeError(f"No rate table found. Page text sample: {diagnostic_snippet(soup)!r}")
 
@@ -366,7 +376,7 @@ def fetch_bank_deposit_rate(bank_slug):
             return {"rate": rate, "as_of": as_of}
 
     raise RuntimeError(
-        f"12-month row not found in counter table. Page text sample: {diagnostic_snippet(soup)!r}"
+        f"12-month row not found in rate table. Page text sample: {diagnostic_snippet(soup)!r}"
     )
 
 
