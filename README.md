@@ -80,16 +80,21 @@ confirmed directly — with the *same* table format for every bank, so one
 simple `requests.get()` (no browser, no PDF library) now covers all ten.
 
 Each bank's page has two tables: "tại Quầy" (at the counter — the
-standard, walk-in rate) and "Trực tuyến" (online, usually a bit higher).
-The fetcher reads the counter table specifically, then the row labeled
-"12" (months). If a bank's page layout changes and the row can't be
-found, the error includes a snippet of what the page actually contained,
-so a failure is diagnosable from the email itself rather than requiring
-another round of guessing — check `fetch_bank_deposit_rate()` in
-`interest_rate_emailer.py` against whatever that snippet shows.
+standard, walk-in rate) and "Trực tuyến" (online, usually noticeably
+higher — that gap is each bank's incentive to get you using the app
+instead of a branch). The fetcher reads the **online** table specifically
+— that's what actually matches the rate shown in a bank's own app — then
+the row labeled "12" (months), falling back to the counter table if a
+bank's page doesn't have a separate online one. If a bank's page layout
+changes and the row can't be found, the error includes a snippet of what
+the page actually contained, so a failure is diagnosable from the email
+itself rather than requiring another round of guessing — check
+`fetch_bank_deposit_rate()` in `interest_rate_emailer.py` against
+whatever that snippet shows.
 
-Each bank also offers other terms, online-only promotions, and
-balance-tiered rates not captured here — the 12-month counter rate is a
+Each bank also offers other terms, new-customer promotions, and
+balance-tiered rates not captured here (e.g. a large-balance tier can run
+well above the standard online rate) — the 12-month online rate is a
 reasonable single number for comparison, not necessarily the *best* rate
 any given bank currently offers (24hmoney.vn's own page, linked in the
 email, has the full table per bank).
