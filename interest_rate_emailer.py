@@ -48,6 +48,7 @@ import re
 import sys
 import json
 import html
+import time
 import smtplib
 import traceback
 from datetime import datetime
@@ -307,26 +308,68 @@ FETCHERS = [
 # and each call takes several seconds instead of a fraction of one.
 
 
-def render_js_page(url, wait_selector=None, timeout_ms=30000, settle_ms=3000):
+def render_js_page(url, wait_selector=None, timeout_ms=30000, settle_ms=3000, attempts=3):
     """Loads a page with a headless Chromium browser and returns the fully
     rendered HTML, for pages whose content is populated by client-side JS
     (confirmed necessary for both bank pages below - see module note above).
     `settle_ms` is extra idle time after "networkidle" for slow AJAX widgets
     that finish their network calls but still take a moment to paint.
+
+    Retries with backoff and HTTP/2 disabled after the first attempt: some
+    banking-site WAFs/CDNs respond to automated traffic with a raw
+    connection-level error (seen in practice as net::ERR_HTTP2_PROTOCOL_ERROR)
+    rather than a clean HTTP status, and disabling HTTP/2 works around that
+    on some sites' edge configurations. This may not fully solve it if the
+    real cause is IP-based bot detection rather than a protocol quirk - that
+    would need addressing outside this script (e.g. running from a
+    residential/non-datacenter IP), not something a retry can fix.
     """
     from playwright.sync_api import sync_playwright
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+    last_error = None
+    for attempt in range(attempts):
+        disable_http2 = attempt > 0  # try normally first, then fall back
+        args = ["--no-sandbox"]
+        if disable_http2:
+            args.append("--disable-http2")
         try:
-            page = browser.new_page(user_agent=HEADERS["User-Agent"])
-            page.goto(url, wait_until="networkidle", timeout=timeout_ms)
-            if wait_selector:
-                page.wait_for_selector(wait_selector, timeout=timeout_ms)
-            page.wait_for_timeout(settle_ms)
-            return page.content()
-        finally:
-            browser.close()
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True, args=args)
+                try:
+                    page = browser.new_page(
+                        user_agent=HEADERS["User-Agent"],
+                        extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+                    )
+                    try:
+                        page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+                    except Exception:
+                        # networkidle can hang on pages with persistent polling;
+                        # fall back to a looser wait condition before giving up.
+                        page.goto(url, wait_until="load", timeout=timeout_ms)
+                    if wait_selector:
+                        page.wait_for_selector(wait_selector, timeout=timeout_ms)
+                    page.wait_for_timeout(settle_ms)
+                    return page.content()
+                finally:
+                    browser.close()
+        except Exception as e:
+            last_error = e
+            if attempt < attempts - 1:
+                time.sleep(5 * (attempt + 1))
+    raise last_error
+
+
+def diagnostic_snippet(soup, around_pattern=r"12"):
+    """Grabs a short snippet of the rendered page's visible text, centered
+    on the first occurrence of around_pattern if found, otherwise from the
+    start. Included in error messages below so a failure shows what the
+    page actually contained instead of just "not found" - turning the next
+    debugging round into "read this snippet" instead of another screenshot.
+    """
+    text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
+    match = re.search(around_pattern, text)
+    start = max(0, (match.start() - 80 if match else 0))
+    return text[start:start + 300]
 
 
 def fetch_vietcombank_rate():
@@ -343,7 +386,9 @@ def fetch_vietcombank_rate():
     soup = BeautifulSoup(rendered_html, "html.parser")
     table = soup.find("table")
     if not table:
-        raise RuntimeError("Rate table not found after page render - markup may have changed")
+        raise RuntimeError(
+            f"Rate table not found after page render. Page text sample: {diagnostic_snippet(soup)!r}"
+        )
 
     for row in table.find_all("tr"):
         cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
@@ -354,7 +399,9 @@ def fetch_vietcombank_rate():
                 if re.search(r"\d", cell):
                     rate = cell if "%" in cell else f"{cell}%"
                     return {"rate": rate, "as_of": now_vn().strftime("%Y-%m-%d")}
-    raise RuntimeError("12-month VND row not found in rendered table")
+    raise RuntimeError(
+        f"12-month VND row not found in rendered table. Page text sample: {diagnostic_snippet(soup)!r}"
+    )
 
 
 def fetch_techcombank_rate():
@@ -371,11 +418,16 @@ def fetch_techcombank_rate():
     soup = BeautifulSoup(rendered_html, "html.parser")
     text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
 
-    match = re.search(r"12[\s-]?months?[^%]{0,20}?(\d{1,2}(?:\.\d{1,2})?)\s?%", text, re.I)
+    # Accept "months"/"month" and Vietnamese "tháng" (in case the /en/ page
+    # still renders some Vietnamese, or a locale redirect happened).
+    term = r"(?:months?|th[aá]ng)"
+    match = re.search(rf"12[\s-]?{term}[^%]{{0,20}}?(\d{{1,2}}(?:\.\d{{1,2}})?)\s?%", text, re.I)
     if not match:
-        match = re.search(r"(\d{1,2}(?:\.\d{1,2})?)\s?%[^%]{0,20}?12[\s-]?months?", text, re.I)
+        match = re.search(rf"(\d{{1,2}}(?:\.\d{{1,2}})?)\s?%[^%]{{0,20}}?12[\s-]?{term}", text, re.I)
     if not match:
-        raise RuntimeError("12-month rate not found after page render - markup may have changed")
+        raise RuntimeError(
+            f"12-month rate not found after page render. Page text sample: {diagnostic_snippet(soup)!r}"
+        )
     return {"rate": f"{match.group(1)}%", "as_of": now_vn().strftime("%Y-%m-%d")}
 
 
