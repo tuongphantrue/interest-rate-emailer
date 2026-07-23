@@ -102,41 +102,56 @@ currently offers.
 If any single bank fails to fetch, only that bank's block notes the
 failure — the rest of the email still generates and sends normally.
 
-## Special products (Vietcombank Certificate of Deposit)
+## Special products (Certificates of Deposit)
 
 Separate from both sections above, the email has a third card for
-**Vietcombank's Certificate of Deposit** ("Chứng chỉ tiền gửi trực
-tuyến") — a fundamentally different product from a regular savings
-account:
+**Certificates of Deposit** — a fundamentally different product from a
+regular savings account, currently tracking:
+
+- **Vietcombank** — "Chứng chỉ tiền gửi trực tuyến"
+- **Techcombank** — "Chứng chỉ tiền gửi Bảo Lộc" (Bao Loc CD)
+
+What makes these different from regular savings:
 
 - Bond-like: fixed term, cannot be withdrawn early
-- But transferable — can be sold on to Vietcombank Securities (VCBS),
-  used as loan collateral, or transferred to another holder
-- Sold only through the VCB Digibank app, in periodic limited-scale
-  issuances rather than an always-open account
-- Priced noticeably higher than regular savings for the same bank (this
-  is *why* it exists — it's Vietcombank's higher-yield alternative for
-  customers who don't need instant liquidity)
+- But transferable — Vietcombank's can be sold on to Vietcombank
+  Securities (VCBS) or used as loan collateral; Techcombank's can be
+  transferred to another holder via the app
+- Priced noticeably higher than each bank's regular savings rate (this
+  is *why* they exist — a higher-yield alternative for customers who
+  don't need instant liquidity)
+- The two banks structure this differently: Vietcombank sells fixed
+  6/9/12-month terms in periodic limited-scale issuances; Techcombank's
+  is an always-open product priced by exact holding period (days to
+  months) rather than fixed terms
 
-This is why Vietcombank can simultaneously show ~5.9% on regular savings
-and ~7.9% on this product — both are accurate, they're just different
-things. If you've seen a rate above 7% "in the Vietcombank app" that
-didn't match the regular savings table, this is almost certainly it.
+This is why a bank can simultaneously show ~5.9% on regular savings and
+~7.9% on this product — both are accurate, they're just different
+things. If you've seen a rate above 7% "in the app" that didn't match
+the regular savings table, this is almost certainly it.
 
-**Source**: rather than trying to track individual news articles about
-each new issuance (which a script has no reliable way to discover on its
-own), this reads Vietcombank's own permanent product page, which they
-update with the current issuance's headline rate each time:
-https://www.vietcombank.com.vn/vi-VN/KHCN/SPDV/Dau-tu/Chung-chi-tien-gui-truc-tuyen —
-confirmed server-rendered, the rate is present in the raw HTML as
-"Lãi suất hấp dẫn đến X%/năm".
+**Sources**: rather than trying to track individual news articles about
+each new issuance or rate change (which a script has no reliable way to
+discover on its own), this reads each bank's own permanent product page,
+which they keep updated with the current headline rate:
 
-**Only Vietcombank is tracked here.** This was added because it's the
-one that came up — other banks may or may not run an equivalent product,
-and each would need its own page checked the same way this one was
-before adding it. If a bank has no issuance open when the script runs,
-expect "unavailable" rather than a stale old figure — the fetcher looks
-for a live headline rate, not a cached one.
+- Vietcombank: https://www.vietcombank.com.vn/vi-VN/KHCN/SPDV/Dau-tu/Chung-chi-tien-gui-truc-tuyen
+  — confirmed server-rendered, rate present in the raw HTML as
+  "Lãi suất hấp dẫn đến X%/năm"
+- Techcombank: https://techcombank.com/en/personal/save/certificate-of-deposit
+  — confirmed server-rendered, rate present in the raw HTML as
+  "Attractive profit up to X%/year (\*) for 3M holding" — note this is
+  specifically the 3-month-holding figure, Techcombank's own headline
+  comparison point, not necessarily the maximum available at other
+  holding periods
+
+**Only these two are tracked here.** They're the ones that came up in
+conversation; other banks may or may not run an equivalent product, and
+each would need its own page checked the same way these two were before
+adding it. If a bank has no issuance open (Vietcombank specifically —
+Techcombank's is always-open) when the script runs, expect "unavailable"
+rather than a stale old figure — the fetcher looks for a live headline
+rate, not a cached one.
 
 ## One-time setup (~5 minutes)
 
