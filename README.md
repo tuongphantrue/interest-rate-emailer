@@ -58,12 +58,12 @@ bare annual figure more than a year old with an "annual figure, may be
 outdated" badge, specifically so this one doesn't get mistaken for a
 current number.
 
-## Vietnam commercial banks (10 banks)
+## Vietnam commercial banks (10 banks, every term)
 
 Because the national-average deposit rate above isn't the number most
 people actually want, the email also has a second section with each
-bank's own advertised **12-month VND savings rate** (the tenor Vietnamese
-financial press typically uses when comparing banks), for:
+bank's own advertised savings rates — **every term the bank lists, both
+at-counter and online** — for:
 
 Vietcombank, Techcombank, BIDV, VietinBank, MB Bank, ACB, VPBank,
 Sacombank, HDBank, and TPBank.
@@ -82,25 +82,25 @@ simple `requests.get()` (no browser, no PDF library) now covers all ten.
 Each bank's page has two tables: "tại Quầy" (at the counter — the
 standard, walk-in rate) and "Trực tuyến" (online, usually noticeably
 higher — that gap is each bank's incentive to get you using the app
-instead of a branch). The fetcher reads the **online** table specifically
-— that's what actually matches the rate shown in a bank's own app — then
-the row labeled "12" (months), falling back to the counter table if a
-bank's page doesn't have a separate online one. If a bank's page layout
-changes and the row can't be found, the error includes a snippet of what
-the page actually contained, so a failure is diagnosable from the email
-itself rather than requiring another round of guessing — check
-`fetch_bank_deposit_rate()` in `interest_rate_emailer.py` against
-whatever that snippet shows.
+instead of a branch, and the online figure is what actually matches the
+rate shown in a bank's own app). The email shows both, side by side, for
+every term the bank publishes (typically 1/3/6/9/12 months, sometimes
+more) — not just a single headline number. Each term row also gets its
+own "changed" badge if that specific term/channel moved since the last
+run. If a bank's page layout changes and no rows can be parsed, the error
+includes a snippet of what the page actually contained, so a failure is
+diagnosable from the email itself rather than requiring another round of
+guessing — check `fetch_bank_all_rates()` in `interest_rate_emailer.py`
+against whatever that snippet shows.
 
-Each bank also offers other terms, new-customer promotions, and
-balance-tiered rates not captured here (e.g. a large-balance tier can run
-well above the standard online rate) — the 12-month online rate is a
-reasonable single number for comparison, not necessarily the *best* rate
-any given bank currently offers (24hmoney.vn's own page, linked in the
-email, has the full table per bank).
+Each bank also offers new-customer promotions and balance-tiered rates
+not captured here (e.g. a large-balance tier can run above the standard
+listed rate for the same term) — the listed rates are a reasonable
+comparison point, not necessarily the *best* rate any given bank
+currently offers.
 
-If any single bank fails to fetch, only that line notes the failure —
-the rest of the email still generates and sends normally.
+If any single bank fails to fetch, only that bank's block notes the
+failure — the rest of the email still generates and sends normally.
 
 ## One-time setup (~5 minutes)
 
