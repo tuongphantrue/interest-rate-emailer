@@ -334,18 +334,29 @@ def diagnostic_snippet(soup, around_pattern=r"12"):
     return text[start:start + 300]
 
 
-def fetch_bank_deposit_rate(bank_slug):
-    """Fetches a bank's 12-month VND savings rate from 24hmoney.vn's
+def _parse_rate_table(table):
+    """Parses a 24hmoney.vn rate table into {term_label: rate_string}."""
+    rates = {}
+    for row in table.find_all("tr"):
+        cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
+        if len(cells) < 2 or not re.search(r"\d", cells[0]):
+            continue  # skip header row ("Kỳ hạn" / "Lãi suất")
+        term, rate = cells[0], cells[1]
+        if not rate.endswith("%"):
+            rate += "%"
+        rates[term] = rate
+    return rates
+
+
+def fetch_bank_all_rates(bank_slug):
+    """Fetches every term/rate combination for a bank from 24hmoney.vn's
     per-bank rate page - confirmed server-rendered (no JavaScript needed)
     and using one consistent table format across every bank tracked here.
 
-    Reads the "Trực tuyến" (online) table rather than "tại Quầy" (at the
-    counter): banking apps show the online rate, which every major
-    Vietnamese bank lists noticeably higher than its walk-in counter rate
-    (that gap is the incentive to use the app/website instead of a
-    branch), so online is what actually matches "what my app shows".
-    Falls back to the counter table if a bank's page doesn't have a
-    separate online table.
+    Returns both the "tại Quầy" (at counter - walk-in) and "Trực tuyến"
+    (online, usually noticeably higher - that gap is each bank's incentive
+    to get you using the app instead of a branch) rates for every term the
+    bank lists, rather than a single headline figure.
     """
     url = f"https://24hmoney.vn/lai-suat-gui-ngan-hang/{bank_slug}"
     resp = requests.get(url, headers=HEADERS, timeout=15)
@@ -359,29 +370,40 @@ def fetch_bank_deposit_rate(bank_slug):
     counter_heading = soup.find(
         lambda tag: tag.name in ("h2", "h3") and "Quầy" in tag.get_text()
     )
-    heading = online_heading or counter_heading
-    table = heading.find_next("table") if heading else soup.find("table")
-    if not table:
-        raise RuntimeError(f"No rate table found. Page text sample: {diagnostic_snippet(soup)!r}")
+    counter_table = counter_heading.find_next("table") if counter_heading else None
+    online_table = online_heading.find_next("table") if online_heading else None
+
+    if not counter_table and not online_table:
+        fallback = soup.find("table")
+        if not fallback:
+            raise RuntimeError(f"No rate table found. Page text sample: {diagnostic_snippet(soup)!r}")
+        counter_table = fallback
+
+    counter_rates = _parse_rate_table(counter_table) if counter_table else {}
+    online_rates = _parse_rate_table(online_table) if online_table else {}
+    if not counter_rates and not online_rates:
+        raise RuntimeError(f"Tables found but no term rows parsed. Page text sample: {diagnostic_snippet(soup)!r}")
 
     as_of_match = re.search(r"th[aá]ng\s+(\d{2}/\d{4})", soup.get_text())
     as_of = as_of_match.group(1) if as_of_match else now_vn().strftime("%Y-%m-%d")
 
-    for row in table.find_all("tr"):
-        cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
-        if len(cells) >= 2 and "12" in cells[0]:
-            rate = cells[1]
-            if not rate.endswith("%"):
-                rate += "%"
-            return {"rate": rate, "as_of": as_of}
+    # Preserve term order as listed (counter table's order first, since
+    # it's usually the more complete/canonical list), append any terms
+    # that only appear in the online table.
+    term_order = list(counter_rates.keys())
+    for term in online_rates:
+        if term not in term_order:
+            term_order.append(term)
 
-    raise RuntimeError(
-        f"12-month row not found in rate table. Page text sample: {diagnostic_snippet(soup)!r}"
-    )
+    terms = [
+        {"term": term, "counter": counter_rates.get(term, "-"), "online": online_rates.get(term, "-")}
+        for term in term_order
+    ]
+    return {"as_of": as_of, "terms": terms}
 
 
 COMMERCIAL_BANK_FETCHERS = [
-    (name, (lambda slug=slug: fetch_bank_deposit_rate(slug)))
+    (name, (lambda slug=slug: fetch_bank_all_rates(slug)))
     for name, slug in BANK_SLUGS.items()
 ]
 
@@ -415,7 +437,7 @@ def save_rates(results):
             snapshot["central_banks"][name] = entry
     for name, r in results.get("commercial_banks", {}).items():
         if r.get("ok"):
-            snapshot["commercial_banks"][name] = r["rate"]
+            snapshot["commercial_banks"][name] = r["terms"]
     with open(STATE_FILE, "w") as f:
         json.dump(snapshot, f)
 
@@ -437,11 +459,28 @@ def prev_entry(previous_rates, name):
     return prev if isinstance(prev, dict) else {}
 
 
-def prev_commercial_rate(previous_rates, name):
+def prev_commercial_terms(previous_rates, name):
+    """Returns the previous run's list of {term, counter, online} dicts for
+    a commercial bank, or None if there's no comparable previous data
+    (including from the single-rate-per-bank format used before this
+    version, which can't be compared term-for-term).
+    """
     if not previous_rates:
         return None
     section = previous_rates.get("commercial_banks")
-    return section.get(name) if isinstance(section, dict) else None
+    if not isinstance(section, dict):
+        return None
+    prev = section.get(name)
+    return prev if isinstance(prev, list) else None
+
+
+def find_prev_term(prev_terms, term_label):
+    if not prev_terms:
+        return None
+    for pt in prev_terms:
+        if pt.get("term") == term_label:
+            return pt
+    return None
 
 
 def has_changed(results, previous_rates):
@@ -454,7 +493,7 @@ def has_changed(results, previous_rates):
         if r["deposit"].get("ok") and prev.get("deposit") != r["deposit"]["rate"]:
             return True
     for name, r in results.get("commercial_banks", {}).items():
-        if r.get("ok") and prev_commercial_rate(previous_rates, name) != r["rate"]:
+        if r.get("ok") and prev_commercial_terms(previous_rates, name) != r["terms"]:
             return True
     return False
 
@@ -465,7 +504,7 @@ def has_changed(results, previous_rates):
 def _try_fetch(fetcher, name, label):
     try:
         data = fetcher()
-        return {"ok": True, "rate": data["rate"], "as_of": data["as_of"]}
+        return {"ok": True, **data}
     except Exception as e:
         print(f"{name} {label} source failed ({e}), continuing without it.")
         traceback.print_exc()
@@ -535,12 +574,27 @@ def format_email_body(results, previous_rates):
     lines.append("any specific bank's current advertised rate, which may run higher or lower.")
 
     lines.append("")
-    lines.append(f"Vietnam commercial banks - 12-month VND savings rate")
-    lines.append("-" * 95)
+    lines.append("Vietnam commercial banks - all terms, at-counter vs online (%/year)")
+    lines.append("=" * 95)
     for name, _url in COMMERCIAL_BANK_SOURCES:
         r = commercial_banks.get(name, {})
-        prev_val = prev_commercial_rate(previous_rates, name)
-        lines.append(f"{name:<24} | {cell(r, prev_val)}")
+        lines.append("")
+        if not r.get("ok"):
+            lines.append(f"{name} - unavailable ({r.get('error', 'unknown error')})")
+            continue
+        prev_terms = prev_commercial_terms(previous_rates, name)
+        lines.append(f"{name} (as of {r['as_of']})")
+        lines.append(f"  {'Term':<14} | {'At counter':<20} | {'Online'}")
+        for t in r["terms"]:
+            prev_t = find_prev_term(prev_terms, t["term"])
+            counter_s = t["counter"]
+            online_s = t["online"]
+            if prev_t:
+                if prev_t.get("counter") not in (None, t["counter"]):
+                    counter_s += f" [was {prev_t['counter']}]"
+                if prev_t.get("online") not in (None, t["online"]):
+                    online_s += f" [was {prev_t['online']}]"
+            lines.append(f"  {t['term']:<14} | {counter_s:<20} | {online_s}")
 
     lines.append("")
     lines.append("Policy rate sources:")
@@ -615,18 +669,58 @@ def format_email_html(results, previous_rates):
             </tr>"""
         rows_html.append(row)
 
-    commercial_rows_html = []
-    for i, (name, _url) in enumerate(COMMERCIAL_BANK_SOURCES):
-        r = commercial_banks.get(name, {})
-        prev_val = prev_commercial_rate(previous_rates, name)
-        border = "" if i == len(COMMERCIAL_BANK_SOURCES) - 1 else "border-bottom:1px solid #f0f1f3;"
-        row = f"""
+    def bank_block_html(name, r, is_last_bank):
+        if not r.get("ok"):
+            err = esc(r.get("error", "unknown error"))
+            border = "" if is_last_bank else "border-bottom:1px solid #e5e7eb;"
+            return f"""
             <tr>
-              <td style="padding:14px 20px;{border}vertical-align:top;font-family:{FONT_STACK};
-                         font-size:14px;font-weight:600;color:#111827;width:30%;">{esc(name)}</td>
-              {rate_cell(r, prev_val, border)}
+              <td colspan="3" style="padding:16px 20px;{border}font-family:{FONT_STACK};">
+                <div style="font-size:14px;font-weight:700;color:#111827;margin-bottom:4px;">{esc(name)}</div>
+                <span style="font-size:13px;color:#9ca3af;font-style:italic;">Unavailable</span><br>
+                {badge(err, "#fee2e2", "#991b1b")}
+              </td>
             </tr>"""
-        commercial_rows_html.append(row)
+
+        prev_terms = prev_commercial_terms(previous_rates, name)
+        rows = [f"""
+            <tr>
+              <td colspan="3" style="padding:16px 20px 4px;font-family:{FONT_STACK};">
+                <div style="font-size:14px;font-weight:700;color:#111827;">{esc(name)}</div>
+                <div style="font-size:11px;color:#9ca3af;">as of {esc(r['as_of'])}</div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:2px 20px 6px;font-family:{FONT_STACK};font-size:11px;text-transform:uppercase;
+                         letter-spacing:0.03em;color:#9ca3af;border-bottom:1px solid #f0f1f3;">Term</td>
+              <td style="padding:2px 20px 6px;font-family:{FONT_STACK};font-size:11px;text-transform:uppercase;
+                         letter-spacing:0.03em;color:#9ca3af;border-bottom:1px solid #f0f1f3;">At counter</td>
+              <td style="padding:2px 20px 6px;font-family:{FONT_STACK};font-size:11px;text-transform:uppercase;
+                         letter-spacing:0.03em;color:#9ca3af;border-bottom:1px solid #f0f1f3;">Online</td>
+            </tr>"""]
+
+        for i, t in enumerate(r["terms"]):
+            prev_t = find_prev_term(prev_terms, t["term"])
+            last_row = is_last_bank and i == len(r["terms"]) - 1
+            border = "" if last_row else "border-bottom:1px solid #f7f7f8;"
+            counter_badge = ""
+            online_badge = ""
+            if prev_t and prev_t.get("counter") not in (None, t["counter"]):
+                counter_badge = "<br>" + badge(f"was {esc(prev_t['counter'])}", "#fef3c7", "#92400e")
+            if prev_t and prev_t.get("online") not in (None, t["online"]):
+                online_badge = "<br>" + badge(f"was {esc(prev_t['online'])}", "#fef3c7", "#92400e")
+            rows.append(f"""
+            <tr>
+              <td style="padding:6px 20px;{border}font-family:{FONT_STACK};font-size:13px;color:#374151;">{esc(t['term'])}</td>
+              <td style="padding:6px 20px;{border}font-family:{FONT_STACK};font-size:13px;font-weight:600;color:#111827;">{esc(t['counter'])}{counter_badge}</td>
+              <td style="padding:6px 20px;{border}font-family:{FONT_STACK};font-size:13px;font-weight:600;color:#111827;">{esc(t['online'])}{online_badge}</td>
+            </tr>""")
+        return "".join(rows)
+
+    commercial_rows_html = [
+        bank_block_html(name, commercial_banks.get(name, {}), i == len(COMMERCIAL_BANK_SOURCES) - 1)
+        for i, (name, _url) in enumerate(COMMERCIAL_BANK_SOURCES)
+    ]
 
     def sources_block(title, source_list):
         rows = "".join(
@@ -707,7 +801,7 @@ def format_email_html(results, previous_rates):
               Vietnam Commercial Banks
             </div>
             <div style="font-family:{FONT_STACK};font-size:12px;color:#9ca3af;margin-top:2px;">
-              12-month VND savings rate
+              All terms - at counter vs online (%/year)
             </div>
           </td>
         </tr>
