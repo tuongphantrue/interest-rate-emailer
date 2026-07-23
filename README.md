@@ -102,6 +102,42 @@ currently offers.
 If any single bank fails to fetch, only that bank's block notes the
 failure — the rest of the email still generates and sends normally.
 
+## Special products (Vietcombank Certificate of Deposit)
+
+Separate from both sections above, the email has a third card for
+**Vietcombank's Certificate of Deposit** ("Chứng chỉ tiền gửi trực
+tuyến") — a fundamentally different product from a regular savings
+account:
+
+- Bond-like: fixed term, cannot be withdrawn early
+- But transferable — can be sold on to Vietcombank Securities (VCBS),
+  used as loan collateral, or transferred to another holder
+- Sold only through the VCB Digibank app, in periodic limited-scale
+  issuances rather than an always-open account
+- Priced noticeably higher than regular savings for the same bank (this
+  is *why* it exists — it's Vietcombank's higher-yield alternative for
+  customers who don't need instant liquidity)
+
+This is why Vietcombank can simultaneously show ~5.9% on regular savings
+and ~7.9% on this product — both are accurate, they're just different
+things. If you've seen a rate above 7% "in the Vietcombank app" that
+didn't match the regular savings table, this is almost certainly it.
+
+**Source**: rather than trying to track individual news articles about
+each new issuance (which a script has no reliable way to discover on its
+own), this reads Vietcombank's own permanent product page, which they
+update with the current issuance's headline rate each time:
+https://www.vietcombank.com.vn/vi-VN/KHCN/SPDV/Dau-tu/Chung-chi-tien-gui-truc-tuyen —
+confirmed server-rendered, the rate is present in the raw HTML as
+"Lãi suất hấp dẫn đến X%/năm".
+
+**Only Vietcombank is tracked here.** This was added because it's the
+one that came up — other banks may or may not run an equivalent product,
+and each would need its own page checked the same way this one was
+before adding it. If a bank has no issuance open when the script runs,
+expect "unavailable" rather than a stale old figure — the fetcher looks
+for a live headline rate, not a cached one.
+
 ## One-time setup (~5 minutes)
 
 1. **Create a GitHub account** if you don't have one: https://github.com/join
