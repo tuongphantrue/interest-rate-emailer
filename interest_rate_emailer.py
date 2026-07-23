@@ -419,14 +419,18 @@ COMMERCIAL_BANK_FETCHERS = [
 # they're just different products, which is why this gets its own section
 # rather than folding into the terms tables above.
 #
-# Only Vietcombank's is tracked here since it's the one this was actually
-# asked about; other banks may or may not run an equivalent product, and
-# each would need its own page checked the same way this one was (see
-# README) before adding it.
+# Both Vietcombank's and Techcombank's are tracked here, since both were
+# specifically asked about and both have a stable, server-rendered
+# official product page with a clean "up to X%" headline (confirmed by
+# fetching each directly). Other banks may or may not run an equivalent
+# product, and each would need its own page checked the same way these
+# two were (see README) before adding it.
 
 SPECIAL_PRODUCT_SOURCES = [
     ("Vietcombank Certificate of Deposit",
      "https://www.vietcombank.com.vn/vi-VN/KHCN/SPDV/Dau-tu/Chung-chi-tien-gui-truc-tuyen"),
+    ("Techcombank Bao Loc Certificate of Deposit",
+     "https://techcombank.com/en/personal/save/certificate-of-deposit"),
 ]
 
 
@@ -459,8 +463,39 @@ def fetch_vcb_certificate_of_deposit_rate():
     return {"rate": f"{rate}%", "as_of": now_vn().strftime("%Y-%m-%d")}
 
 
+def fetch_tcb_certificate_of_deposit_rate():
+    """Techcombank's Bao Loc Certificate of Deposit ("Chứng chỉ tiền gửi
+    Bảo Lộc") headline rate - Techcombank's equivalent to Vietcombank's
+    product above, though structured differently: priced by exact holding
+    period (days/months) rather than Vietcombank's fixed 6/9/12-month
+    terms, and it's an always-open product rather than periodic limited
+    issuances. Sold through Techcombank Mobile.
+
+    Techcombank's product page states a headline "up to X% for 3M holding"
+    figure, confirmed present in the raw HTML (server-rendered, same as
+    Vietcombank's page above) - this is the rate for a 3-month hold,
+    Techcombank's own headline comparison point, not necessarily the
+    maximum rate available at longer holding periods.
+    """
+    url = "https://techcombank.com/en/personal/save/certificate-of-deposit"
+    resp = requests.get(url, headers=HEADERS, timeout=15)
+    resp.raise_for_status()
+    fix_encoding(resp)
+    soup = BeautifulSoup(resp.text, "html.parser")
+    text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
+
+    match = re.search(r"profit up to\s*(\d+(?:\.\d+)?)\s*%\s*/\s*year", text, re.I)
+    if not match:
+        raise RuntimeError(
+            f"Headline rate not found - page markup may have changed. "
+            f"Page text sample: {diagnostic_snippet(soup, r'%')!r}"
+        )
+    return {"rate": f"{match.group(1)}%", "as_of": now_vn().strftime("%Y-%m-%d")}
+
+
 SPECIAL_PRODUCT_FETCHERS = [
     ("Vietcombank Certificate of Deposit", fetch_vcb_certificate_of_deposit_rate),
+    ("Techcombank Bao Loc Certificate of Deposit", fetch_tcb_certificate_of_deposit_rate),
 ]
 
 
