@@ -408,6 +408,62 @@ COMMERCIAL_BANK_FETCHERS = [
 ]
 
 
+# --- Special products ---------------------------------------------------------
+#
+# Certificates of deposit are a fundamentally different product from the
+# regular savings tables above: bond-like (fixed term, no early
+# withdrawal, but transferable/usable as loan collateral), sold in
+# periodic limited-scale issuances rather than an always-open account, and
+# priced noticeably higher than regular savings for the same bank. Both
+# this and a bank's regular savings rate can be simultaneously accurate -
+# they're just different products, which is why this gets its own section
+# rather than folding into the terms tables above.
+#
+# Only Vietcombank's is tracked here since it's the one this was actually
+# asked about; other banks may or may not run an equivalent product, and
+# each would need its own page checked the same way this one was (see
+# README) before adding it.
+
+SPECIAL_PRODUCT_SOURCES = [
+    ("Vietcombank Certificate of Deposit",
+     "https://www.vietcombank.com.vn/vi-VN/KHCN/SPDV/Dau-tu/Chung-chi-tien-gui-truc-tuyen"),
+]
+
+
+def fetch_vcb_certificate_of_deposit_rate():
+    """Vietcombank's Certificate of Deposit ("Chứng chỉ tiền gửi trực
+    tuyến") headline rate. Sold only through the VCB Digibank app in
+    periodic limited issuances - this is NOT the same product as the
+    regular Vietcombank savings row in the commercial banks section above.
+
+    Vietcombank's product page for this is a stable, permanent URL that
+    they update with the current issuance's headline rate each time,
+    rather than a dated news article (which a script has no reliable way
+    to discover new instances of on its own). Confirmed server-rendered -
+    the rate is present in the raw HTML.
+    """
+    url = "https://www.vietcombank.com.vn/vi-VN/KHCN/SPDV/Dau-tu/Chung-chi-tien-gui-truc-tuyen"
+    resp = requests.get(url, headers=HEADERS, timeout=15)
+    resp.raise_for_status()
+    fix_encoding(resp)
+    soup = BeautifulSoup(resp.text, "html.parser")
+    text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
+
+    match = re.search(r"[Ll]ãi suất.{0,20}?đến\s*(\d+[,.]?\d*)\s*%\s*/\s*năm", text)
+    if not match:
+        raise RuntimeError(
+            f"Headline rate not found - product may be between issuances. "
+            f"Page text sample: {diagnostic_snippet(soup, r'%')!r}"
+        )
+    rate = match.group(1).replace(",", ".")
+    return {"rate": f"{rate}%", "as_of": now_vn().strftime("%Y-%m-%d")}
+
+
+SPECIAL_PRODUCT_FETCHERS = [
+    ("Vietcombank Certificate of Deposit", fetch_vcb_certificate_of_deposit_rate),
+]
+
+
 # --- State (for change detection) --------------------------------------------
 
 
@@ -426,7 +482,7 @@ def load_previous_rates():
 
 
 def save_rates(results):
-    snapshot = {"central_banks": {}, "commercial_banks": {}}
+    snapshot = {"central_banks": {}, "commercial_banks": {}, "special_products": {}}
     for name, r in results.get("central_banks", {}).items():
         entry = {}
         if r["policy"].get("ok"):
@@ -438,6 +494,9 @@ def save_rates(results):
     for name, r in results.get("commercial_banks", {}).items():
         if r.get("ok"):
             snapshot["commercial_banks"][name] = r["terms"]
+    for name, r in results.get("special_products", {}).items():
+        if r.get("ok"):
+            snapshot["special_products"][name] = r["rate"]
     with open(STATE_FILE, "w") as f:
         json.dump(snapshot, f)
 
@@ -474,6 +533,13 @@ def prev_commercial_terms(previous_rates, name):
     return prev if isinstance(prev, list) else None
 
 
+def prev_special_rate(previous_rates, name):
+    if not previous_rates:
+        return None
+    section = previous_rates.get("special_products")
+    return section.get(name) if isinstance(section, dict) else None
+
+
 def find_prev_term(prev_terms, term_label):
     if not prev_terms:
         return None
@@ -494,6 +560,9 @@ def has_changed(results, previous_rates):
             return True
     for name, r in results.get("commercial_banks", {}).items():
         if r.get("ok") and prev_commercial_terms(previous_rates, name) != r["terms"]:
+            return True
+    for name, r in results.get("special_products", {}).items():
+        if r.get("ok") and prev_special_rate(previous_rates, name) != r["rate"]:
             return True
     return False
 
@@ -526,7 +595,11 @@ def collect_rates():
     for name, fetcher in COMMERCIAL_BANK_FETCHERS:
         commercial_banks[name] = _try_fetch(fetcher, name, "deposit rate")
 
-    return {"central_banks": central_banks, "commercial_banks": commercial_banks}
+    special_products = {}
+    for name, fetcher in SPECIAL_PRODUCT_FETCHERS:
+        special_products[name] = _try_fetch(fetcher, name, "special product rate")
+
+    return {"central_banks": central_banks, "commercial_banks": commercial_banks, "special_products": special_products}
 
 
 def is_stale_annual(as_of):
@@ -545,6 +618,7 @@ def is_stale_annual(as_of):
 def format_email_body(results, previous_rates):
     central_banks = results.get("central_banks", {})
     commercial_banks = results.get("commercial_banks", {})
+    special_products = results.get("special_products", {})
 
     lines = [f"Central bank interest rates - {now_vn().strftime('%Y-%m-%d %H:%M')}\n"]
     lines.append(f"{'Central bank':<24} | {'Policy rate':<28} | {'Deposit rate'}")
@@ -597,6 +671,17 @@ def format_email_body(results, previous_rates):
             lines.append(f"  {t['term']:<14} | {counter_s:<20} | {online_s}")
 
     lines.append("")
+    lines.append("Special products (not regular savings - see note)")
+    lines.append("=" * 95)
+    lines.append("Note: certificates of deposit are a different product from regular savings -")
+    lines.append("bond-like, fixed term, no early withdrawal, sold in limited issuances. Both")
+    lines.append("this and a bank's regular savings rate above can be accurate at once.")
+    for name, _url in SPECIAL_PRODUCT_SOURCES:
+        r = special_products.get(name, {})
+        prev_val = prev_special_rate(previous_rates, name)
+        lines.append(f"{name:<40} | {cell(r, prev_val)}")
+
+    lines.append("")
     lines.append("Policy rate sources:")
     for name, url in SOURCES:
         lines.append(f"  {name}: {url}")
@@ -607,6 +692,10 @@ def format_email_body(results, previous_rates):
     lines.append("")
     lines.append("Commercial bank sources:")
     for name, url in COMMERCIAL_BANK_SOURCES:
+        lines.append(f"  {name}: {url}")
+    lines.append("")
+    lines.append("Special product sources:")
+    for name, url in SPECIAL_PRODUCT_SOURCES:
         lines.append(f"  {name}: {url}")
 
     return "\n".join(lines)
@@ -654,6 +743,7 @@ def format_email_html(results, previous_rates):
 
     central_banks = results.get("central_banks", {})
     commercial_banks = results.get("commercial_banks", {})
+    special_products = results.get("special_products", {})
 
     rows_html = []
     for i, (name, _url) in enumerate(SOURCES):
@@ -721,6 +811,18 @@ def format_email_html(results, previous_rates):
         bank_block_html(name, commercial_banks.get(name, {}), i == len(COMMERCIAL_BANK_SOURCES) - 1)
         for i, (name, _url) in enumerate(COMMERCIAL_BANK_SOURCES)
     ]
+
+    special_rows_html = []
+    for i, (name, _url) in enumerate(SPECIAL_PRODUCT_SOURCES):
+        r = special_products.get(name, {})
+        prev_val = prev_special_rate(previous_rates, name)
+        border = "" if i == len(SPECIAL_PRODUCT_SOURCES) - 1 else "border-bottom:1px solid #f0f1f3;"
+        special_rows_html.append(f"""
+            <tr>
+              <td style="padding:14px 20px;{border}vertical-align:top;font-family:{FONT_STACK};
+                         font-size:14px;font-weight:600;color:#111827;width:40%;">{esc(name)}</td>
+              {rate_cell(r, prev_val, border)}
+            </tr>""")
 
     def sources_block(title, source_list):
         rows = "".join(
@@ -815,6 +917,42 @@ def format_email_html(results, previous_rates):
         <tr>
           <td style="padding:16px 24px 22px;">
             {sources_block("Sources", COMMERCIAL_BANK_SOURCES)}
+          </td>
+        </tr>
+      </table>
+      <table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0"
+             style="max-width:640px;width:100%;background:#ffffff;border-radius:12px;
+                    overflow:hidden;border:1px solid #e5e7eb;margin-top:20px;">
+        <tr>
+          <td style="background:#1f2937;padding:16px 24px;">
+            <div style="font-family:{FONT_STACK};font-size:15px;font-weight:700;color:#ffffff;">
+              Special Products
+            </div>
+            <div style="font-family:{FONT_STACK};font-size:12px;color:#9ca3af;margin-top:2px;">
+              Not regular savings - see note
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:12px 20px 4px;">
+            <div style="font-family:{FONT_STACK};font-size:12px;color:#6b7280;
+                        background:#f9fafb;border-radius:8px;padding:10px 14px;">
+              Certificates of deposit are a different product from regular savings -
+              bond-like, fixed term, no early withdrawal, sold in limited issuances.
+              Both this and a bank's regular savings rate above can be accurate at once.
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+              {"".join(special_rows_html)}
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:16px 24px 22px;">
+            {sources_block("Sources", SPECIAL_PRODUCT_SOURCES)}
           </td>
         </tr>
       </table>
