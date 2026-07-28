@@ -445,6 +445,13 @@ def fetch_vcb_certificate_of_deposit_rate():
     rather than a dated news article (which a script has no reliable way
     to discover new instances of on its own). Confirmed server-rendered -
     the rate is present in the raw HTML.
+
+    Takes the MAXIMUM of all matches rather than the first: responsive
+    pages often embed more than one copy of the same promotional text
+    (e.g. a separate mobile-layout block hidden via CSS, which
+    BeautifulSoup still sees since it doesn't execute CSS/JS) - if one
+    copy is stale, taking the max is more robust than trusting whichever
+    happened to appear first in the raw HTML.
     """
     url = "https://www.vietcombank.com.vn/vi-VN/KHCN/SPDV/Dau-tu/Chung-chi-tien-gui-truc-tuyen"
     resp = requests.get(url, headers=HEADERS, timeout=15)
@@ -453,13 +460,13 @@ def fetch_vcb_certificate_of_deposit_rate():
     soup = BeautifulSoup(resp.text, "html.parser")
     text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
 
-    match = re.search(r"[Ll]ãi suất.{0,20}?đến\s*(\d+[,.]?\d*)\s*%\s*/\s*năm", text)
-    if not match:
+    matches = re.findall(r"[Ll]ãi suất.{0,20}?đến\s*(\d+[,.]?\d*)\s*%\s*/\s*năm", text)
+    if not matches:
         raise RuntimeError(
             f"Headline rate not found - product may be between issuances. "
             f"Page text sample: {diagnostic_snippet(soup, r'%')!r}"
         )
-    rate = match.group(1).replace(",", ".")
+    rate = max(matches, key=lambda m: float(m.replace(",", "."))).replace(",", ".")
     return {"rate": f"{rate}%", "as_of": now_vn().strftime("%Y-%m-%d")}
 
 
@@ -476,6 +483,9 @@ def fetch_tcb_certificate_of_deposit_rate():
     Vietcombank's page above) - this is the rate for a 3-month hold,
     Techcombank's own headline comparison point, not necessarily the
     maximum rate available at longer holding periods.
+
+    Takes the MAXIMUM of all matches rather than the first, for the same
+    duplicate/hidden-content-block reason as the Vietcombank fetcher above.
     """
     url = "https://techcombank.com/en/personal/save/certificate-of-deposit"
     resp = requests.get(url, headers=HEADERS, timeout=15)
@@ -484,13 +494,14 @@ def fetch_tcb_certificate_of_deposit_rate():
     soup = BeautifulSoup(resp.text, "html.parser")
     text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
 
-    match = re.search(r"profit up to\s*(\d+(?:\.\d+)?)\s*%\s*/\s*year", text, re.I)
-    if not match:
+    matches = re.findall(r"profit up to\s*(\d+(?:\.\d+)?)\s*%\s*/\s*year", text, re.I)
+    if not matches:
         raise RuntimeError(
             f"Headline rate not found - page markup may have changed. "
             f"Page text sample: {diagnostic_snippet(soup, r'%')!r}"
         )
-    return {"rate": f"{match.group(1)}%", "as_of": now_vn().strftime("%Y-%m-%d")}
+    rate = max(matches, key=float)
+    return {"rate": f"{rate}%", "as_of": now_vn().strftime("%Y-%m-%d")}
 
 
 SPECIAL_PRODUCT_FETCHERS = [
