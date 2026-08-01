@@ -320,7 +320,7 @@ def diagnostic_snippet(soup, around_pattern=r"12"):
     return text[start:start + 300]
 
 
-def render_js_page(url, wait_selector=None, goto_timeout_ms=20000, selector_timeout_ms=25000,
+def render_js_page(url, wait_selector=None, goto_timeout_ms=35000, selector_timeout_ms=25000,
                     settle_ms=3000, attempts=3):
     """Loads a page with a headless Chromium browser and returns the fully
     rendered HTML, for official bank pages whose content is populated by
@@ -330,6 +330,12 @@ def render_js_page(url, wait_selector=None, goto_timeout_ms=20000, selector_time
     for the content selector we need. Retries with HTTP/2 disabled after
     the first attempt, since some banking-site WAFs respond to automated
     traffic with a raw connection error under HTTP/2 specifically.
+
+    goto_timeout_ms was raised from 20s to 35s after Vietcombank's page
+    timed out even on the lenient "domcontentloaded" wait in practice -
+    that points to real network slowness/throttling from GitHub's runner
+    IPs reaching that specific site, not a wait-condition problem, so more
+    headroom is the applicable fix rather than a different wait strategy.
     """
     from playwright.sync_api import sync_playwright
 
