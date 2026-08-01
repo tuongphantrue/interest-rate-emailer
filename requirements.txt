@@ -1,4 +1,4 @@
 requests
 beautifulsoup4
-playwright
+playwright==1.61.0
 pypdf
