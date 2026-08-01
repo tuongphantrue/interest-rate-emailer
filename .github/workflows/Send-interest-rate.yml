@@ -25,18 +25,17 @@ jobs:
 
       - name: Cache Playwright browser
         uses: actions/cache@v4
-        id: playwright-cache
         with:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
 
       - name: Install Playwright browser
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        # Always run this, even on a cache hit: `playwright install` is
+        # idempotent (skips the download if the correct version is already
+        # present), and skipping it conditionally caused real failures in
+        # practice when the cached browser build didn't match what the
+        # installed playwright package expected.
         run: playwright install --with-deps chromium
-
-      - name: Install Playwright OS dependencies (cache hit)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: playwright install-deps chromium
 
       - name: Restore previous state
         continue-on-error: true
