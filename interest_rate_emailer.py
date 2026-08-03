@@ -1346,7 +1346,7 @@ def format_email_body(results, previous_rates):
     return "\n".join(lines)
 
 
-FONT_STACK = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+FONT_STACK = "'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
 
 
 def format_email_html(results, previous_rates):
@@ -1384,6 +1384,30 @@ def format_email_html(results, previous_rates):
             f'<span style="display:inline-block;margin-top:6px;font-size:11.5px;'
             f'color:{fg};background:{bg};padding:3px 10px;border-radius:999px;'
             f'font-weight:600;font-family:{FONT_STACK};">{text}</span>'
+        )
+
+    def initials(name):
+        stopwords = {"of", "the", "and", "bank"}
+        words = [w for w in re.split(r"[\s&]+", name) if w and w[0].isalpha() and w.lower() not in stopwords]
+        if not words:
+            words = [w for w in re.split(r"[\s&]+", name) if w and w[0].isalpha()]
+        if not words:
+            return "?"
+        if len(words) == 1:
+            return words[0][:2].upper()
+        return (words[0][0] + words[1][0]).upper()
+
+    def avatar_circle(text, bg, fg):
+        return (
+            f'<span style="display:inline-block;width:24px;height:24px;border-radius:50%;'
+            f'background:{bg};color:{fg};font-size:10px;font-weight:700;text-align:center;'
+            f'line-height:24px;vertical-align:middle;margin-right:8px;font-family:{FONT_STACK};">{text}</span>'
+        )
+
+    def name_with_avatar(name, bg, fg):
+        return (
+            f'{avatar_circle(esc(initials(name)), bg, fg)}'
+            f'<span style="vertical-align:middle;">{esc(name)}</span>'
         )
 
     def section_header(icon, title, subtitle, accent, tint):
@@ -1445,7 +1469,7 @@ def format_email_html(results, previous_rates):
         row = f"""
             <tr>
               <td style="padding:14px 20px;{border}vertical-align:top;font-family:{FONT_STACK};
-                         font-size:14px;font-weight:600;color:{INK};width:30%;">{esc(name)}</td>
+                         font-size:14px;font-weight:600;color:{INK};width:30%;">{name_with_avatar(name, INDIGO_TINT, INDIGO)}</td>
               {rate_cell(r.get('policy', {}), prev.get('policy'), border, INDIGO)}
               {rate_cell(r.get('deposit', {}), prev.get('deposit'), border, INDIGO)}
             </tr>"""
@@ -1458,7 +1482,7 @@ def format_email_html(results, previous_rates):
             return f"""
             <tr>
               <td colspan="3" style="padding:16px 20px;{border}font-family:{FONT_STACK};">
-                <div style="font-size:14px;font-weight:700;color:{INK};margin-bottom:4px;">{esc(name)}</div>
+                <div style="font-size:14px;font-weight:700;color:{INK};margin-bottom:4px;">{name_with_avatar(name, EMERALD_TINT, EMERALD)}</div>
                 <span style="font-size:13px;color:#9CA3AF;font-style:italic;">Unavailable</span><br>
                 {badge(err, ERROR_BG, ERROR_FG)}
               </td>
@@ -1468,8 +1492,8 @@ def format_email_html(results, previous_rates):
         rows = [f"""
             <tr>
               <td colspan="3" style="padding:16px 20px 4px;background:{EMERALD_TINT};font-family:{FONT_STACK};">
-                <div style="font-size:14px;font-weight:700;color:{INK};">{esc(name)}</div>
-                <div style="font-size:11px;color:{SLATE};">as of {esc(r['as_of'])}</div>
+                <div style="font-size:14px;font-weight:700;color:{INK};">{name_with_avatar(name, WHITE, EMERALD)}</div>
+                <div style="font-size:11px;color:{SLATE};margin-left:32px;">as of {esc(r['as_of'])}</div>
               </td>
             </tr>
             <tr>
@@ -1512,7 +1536,7 @@ def format_email_html(results, previous_rates):
         special_rows_html.append(f"""
             <tr>
               <td style="padding:14px 20px;{border}vertical-align:top;font-family:{FONT_STACK};
-                         font-size:14px;font-weight:600;color:{INK};width:40%;">{esc(name)}</td>
+                         font-size:14px;font-weight:600;color:{INK};width:40%;">{name_with_avatar(name, AMBER_TINT, AMBER)}</td>
               {rate_cell(r, prev_val, border, AMBER)}
             </tr>""")
 
