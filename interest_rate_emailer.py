@@ -403,6 +403,38 @@ def fetch_vietcombank_official_rates():
     return {"as_of": now_vn().strftime("%Y-%m-%d"), "terms": terms}
 
 
+def fetch_vietcombank_rate_with_fallback():
+    """Tries Vietcombank's official site first, falling back to 24hmoney.vn
+    if that fails.
+
+    Vietcombank's site runs behind Akamai (confirmed via DNS/header
+    lookup - akamai-grn headers, akamaitechnologies.com hostnames), a WAF
+    specifically noted for effectively detecting automated traffic even
+    against spoofed user agents. That's caused persistent intermittent
+    failures (protocol errors, timeouts at multiple wait strategies and
+    timeout lengths) that no amount of client-side retry tuning has fully
+    resolved - this is very likely active bot detection, not a slow
+    server, and isn't something to engineer further around.
+
+    24hmoney.vn as a sole source has its own confirmed problem though: its
+    comparison table can lag behind a bank's actual current rate by a few
+    weeks during active rate-hike/cut periods (confirmed directly against
+    a dated news article once). Neither source is unconditionally
+    reliable alone, so this tries the authoritative source first and only
+    falls back when it fails, tagging the result with which source
+    actually supplied it so a reader always knows what they're looking at.
+    """
+    try:
+        result = fetch_vietcombank_official_rates()
+        result["source_note"] = None
+        return result
+    except Exception as e:
+        print(f"Vietcombank official site failed ({e}), falling back to 24hmoney.vn")
+        result = fetch_bank_all_rates("vietcombank")
+        result["source_note"] = "via 24hmoney.vn - official site unavailable this run"
+        return result
+
+
 def fetch_techcombank_official_rates():
     """Techcombank's own official rate-sheet PDF, for every term listed in
     both the "Phat Loc Savings at Counter" and "Phat Loc Online Savings"
@@ -994,7 +1026,7 @@ def fetch_vpbank_official_rates():
 
 
 COMMERCIAL_BANK_FETCHERS = [
-    ("Vietcombank", fetch_vietcombank_official_rates),
+    ("Vietcombank", fetch_vietcombank_rate_with_fallback),
     ("Techcombank", fetch_techcombank_official_rates),
     ("BIDV", fetch_bidv_official_rates),
     ("VietinBank", fetch_vietinbank_official_rates),
@@ -1302,7 +1334,10 @@ def format_email_body(results, previous_rates):
             lines.append(f"{name} - unavailable ({r.get('error', 'unknown error')})")
             continue
         prev_terms = prev_commercial_terms(previous_rates, name)
-        lines.append(f"{name} (as of {r['as_of']})")
+        header = f"{name} (as of {r['as_of']})"
+        if r.get("source_note"):
+            header += f" [{r['source_note']}]"
+        lines.append(header)
         lines.append(f"  {'Term':<14} | {'At counter':<20} | {'Online'}")
         for t in r["terms"]:
             prev_t = find_prev_term(prev_terms, t["term"])
@@ -1489,11 +1524,15 @@ def format_email_html(results, previous_rates):
             </tr>"""
 
         prev_terms = prev_commercial_terms(previous_rates, name)
+        source_badge = ""
+        if r.get("source_note"):
+            source_badge = "<br>" + badge(esc(r["source_note"]), STALE_BG, STALE_FG)
         rows = [f"""
             <tr>
               <td colspan="3" style="padding:16px 20px 4px;background:{EMERALD_TINT};font-family:{FONT_STACK};">
                 <div style="font-size:14px;font-weight:700;color:{INK};">{name_with_avatar(name, WHITE, EMERALD)}</div>
                 <div style="font-size:11px;color:{SLATE};margin-left:32px;">as of {esc(r['as_of'])}</div>
+                <div style="margin-left:32px;">{source_badge}</div>
               </td>
             </tr>
             <tr>
